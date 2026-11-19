@@ -14,37 +14,6 @@ Bộ tiện ích tiếng Việt cho .NET 10.
 | | `NormalizeVietnamesePhone` | `"+84 912 345 678"` → `"0912345678"` |
 | | `IsEmail` | `"a@b.vn"` → `true` |
 | `CurrencyFormatter` | `ToVnd` | `1234567m` → `"1.234.567 ₫"` |
-| `DbDateTimeConverter` | `PostgresTypeToSqlServer` | `"timestamptz(3)"` → `"datetimeoffset(3)"` |
-| | `SqlServerTypeToPostgres` | `"datetime"` → `"timestamp(3)"` |
-| | `PostgresToSqlServer` | `"2024-01-02 03:04:05+07"` → `"2024-01-01T20:04:05"` |
-| | `SqlServerToPostgres` | `"2024-01-02 03:04:05.1234567"` → `"2024-01-02 03:04:05.123457"` |
-
-## Chuyển ngày giờ PostgreSQL ↔ SQL Server
-
-```csharp
-// Kiểu dữ liệu (dùng khi chuyển schema)
-DbDateTimeConverter.PostgresTypeToSqlServer("timestamp(3) with time zone"); // datetimeoffset(3)
-DbDateTimeConverter.SqlServerTypeToPostgres("datetime2(7)");                // timestamp(6)
-
-// Giá trị (dùng khi chuyển dữ liệu)
-DbDateTimeConverter.PostgresToSqlServer("2024-01-02 03:04:05.998", SqlServerDateType.DateTime);
-// → "2024-01-02T03:04:05.997"  (làm tròn 1/300 giây như SQL Server)
-
-DbDateTimeConverter.SqlServerToPostgres("2024-01-02 03:04:05.1234567 +07:00", PostgresDateType.TimestampTz);
-// → "2024-01-02 03:04:05.123457+07:00"  (PostgreSQL chỉ lưu tới micro giây)
-
-// Đổi infinity của PostgreSQL thành giá trị lớn nhất/nhỏ nhất thay vì báo lỗi
-var options = new DbDateTimeOptions { Infinity = InfinityHandling.ClampToRange };
-DbDateTimeConverter.PostgresToSqlServer("infinity", SqlServerDateType.DateTime, options);
-// → "9999-12-31T23:59:59.997"
-```
-
-Quy tắc chính:
-- Chuỗi kết quả cho SQL Server dùng định dạng ISO 8601 (`yyyy-MM-ddTHH:mm:ss`). Định dạng này không phụ thuộc vào cài đặt `DATEFORMAT` hay `LANGUAGE`.
-- Nếu giá trị có múi giờ mà kiểu đích không lưu múi giờ (`datetime`, `datetime2`, `smalldatetime`, `timestamp`), giá trị được đổi sang UTC.
-- Nếu kiểu đích cần múi giờ mà giá trị không có, thư viện dùng `DbDateTimeOptions.DefaultOffset` (mặc định `+00:00`).
-- Giá trị ngoài khoảng của kiểu đích sẽ gây `ArgumentOutOfRangeException`. Ví dụ: năm 1700 với `datetime`, hoặc năm 2080 với `smalldatetime`.
-- `interval` không có kiểu tương đương trong SQL Server nên sẽ gây `NotSupportedException`.
 
 ## Sử dụng
 
