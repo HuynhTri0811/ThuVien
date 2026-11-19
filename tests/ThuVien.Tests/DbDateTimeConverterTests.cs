@@ -231,7 +231,7 @@ public class DbDateTimeIssue4Tests
     // ── Phần lẻ giây làm tròn tràn ngày ──
     [Theory]
     [InlineData("23:59:59.99999995", SqlServerDateType.Time, "23:59:59.9999999")]
-    [InlineData("2024-01-02 23:59:59.99999995", SqlServerDateType.Time, "23:59:59.9999999")]
+    [InlineData("2024-01-02 23:59:59.99999995", SqlServerDateType.Time, "00:00:00")]
     [InlineData("2024-01-02 23:59:59.99999995", SqlServerDateType.DateTime2, "2024-01-03T00:00:00")]
     public void FractionRoundUp_DoesNotWrap(string input, SqlServerDateType target, string expected) =>
         Assert.Equal(expected, DbDateTimeConverter.PostgresToSqlServer(input, target));
@@ -308,40 +308,124 @@ public class DbDateTimeIssue4Tests
     public void Typed_DateTime_ToSqlServer() =>
         Assert.Equal(
             "2024-01-02T03:04:05.997",
-            DbDateTimeConverter.PostgresToSqlServer(new DateTime(2024, 1, 2, 3, 4, 5, 998), SqlServerDateType.DateTime));
+            DbDateTimeConverter.ToSqlServer(new DateTime(2024, 1, 2, 3, 4, 5, 998), SqlServerDateType.DateTime));
 
     [Fact]
     public void Typed_UtcDateTime_GetsZeroOffset() =>
         Assert.Equal(
             "2024-01-02T03:04:05+00:00",
-            DbDateTimeConverter.PostgresToSqlServer(
+            DbDateTimeConverter.ToSqlServer(
                 new DateTime(2024, 1, 2, 3, 4, 5, DateTimeKind.Utc), SqlServerDateType.DateTimeOffset));
 
     [Fact]
     public void Typed_DateTimeOffset_ToSqlServer() =>
         Assert.Equal(
             "2024-01-01T20:04:05",
-            DbDateTimeConverter.PostgresToSqlServer(
+            DbDateTimeConverter.ToSqlServer(
                 new DateTimeOffset(2024, 1, 2, 3, 4, 5, TimeSpan.FromHours(7)), SqlServerDateType.DateTime2));
 
     [Fact]
     public void Typed_DateTime_ToPostgres_RoundsToMicroseconds() =>
         Assert.Equal(
             "2024-01-02 03:04:05.123457",
-            DbDateTimeConverter.SqlServerToPostgres(
+            DbDateTimeConverter.ToPostgres(
                 new DateTime(2024, 1, 2, 3, 4, 5).AddTicks(1_234_567), PostgresDateType.Timestamp));
 
     [Fact]
     public void Typed_DateTimeOffset_ToPostgres() =>
         Assert.Equal(
             "2024-01-02 03:04:05-03:30",
-            DbDateTimeConverter.SqlServerToPostgres(
+            DbDateTimeConverter.ToPostgres(
                 new DateTimeOffset(2024, 1, 2, 3, 4, 5, new TimeSpan(-3, -30, 0)), PostgresDateType.TimestampTz));
 
     [Fact]
     public void Typed_DateTime_ToPostgresTime() =>
         Assert.Equal(
-            "24:00:00",
-            DbDateTimeConverter.SqlServerToPostgres(
+            "00:00:00",
+            DbDateTimeConverter.ToPostgres(
                 new DateTime(2024, 1, 2).AddTicks(TimeSpan.TicksPerDay - 1), PostgresDateType.Time));
+}
+
+/// <summary>Các trường hợp từ lần review commit 0872389.</summary>
+public class DbDateTimeReview2Tests
+{
+    // ── ClampToRange + DefaultOffset ──
+    [Theory]
+    [InlineData("infinity", -5, "9999-12-31T23:59:59.9999999+00:00")]
+    [InlineData("-infinity", 7, "0001-01-01T00:00:00+00:00")]
+    [InlineData("0044-03-15 00:00:00 BC", 7, "0001-01-01T00:00:00+00:00")]
+    public void Clamp_IgnoresDefaultOffset(string input, int offsetHours, string expected)
+    {
+        var options = new DbDateTimeOptions
+        {
+            Infinity = InfinityHandling.ClampToRange,
+            DefaultOffset = TimeSpan.FromHours(offsetHours),
+        };
+        Assert.Equal(expected, DbDateTimeConverter.PostgresToSqlServer(input, SqlServerDateType.DateTimeOffset, options));
+    }
+
+    // ── Phần giờ của giá trị có ngày khớp với phần ngày ──
+    [Theory]
+    [InlineData("2024-01-02 24:00:00", "00:00:00")]
+    [InlineData("2024-01-02 23:59:59.99999995", "00:00:00")]
+    [InlineData("24:00:00", "23:59:59.9999999")]
+    [InlineData("23:59:59.99999995", "23:59:59.9999999")]
+    public void PostgresToSqlServer_TimePart_MatchesDate(string input, string expected) =>
+        Assert.Equal(expected, DbDateTimeConverter.PostgresToSqlServer(input, SqlServerDateType.Time));
+
+    [Theory]
+    [InlineData("2024-01-02 23:59:59.9999999", PostgresDateType.Time, "00:00:00")]
+    [InlineData("2024-01-02 23:59:59.9999999", PostgresDateType.Timestamp, "2024-01-03 00:00:00")]
+    [InlineData("23:59:59.9999999", PostgresDateType.Time, "24:00:00")]
+    [InlineData("2024-01-02 23:59:59.9999999 +07:00", PostgresDateType.TimeTz, "00:00:00+07:00")]
+    public void SqlServerToPostgres_TimePart_MatchesDate(string input, PostgresDateType target, string expected) =>
+        Assert.Equal(expected, DbDateTimeConverter.SqlServerToPostgres(input, target));
+
+    // ── Năm có số 0 ở đầu ──
+    [Theory]
+    [InlineData("02024-01-02 00:00:00", "2024-01-02T00:00:00")]
+    [InlineData("000999-01-02", "0999-01-02T00:00:00")]
+    public void ZeroPaddedYear_IsNotOverflow(string input, string expected) =>
+        Assert.Equal(expected, DbDateTimeConverter.PostgresToSqlServer(input, SqlServerDateType.DateTime2));
+
+    [Theory]
+    [InlineData("0000-01-01")]
+    [InlineData("00000-01-01")]
+    public void YearZero_ThrowsFormatException(string input) =>
+        Assert.Throws<FormatException>(() => DbDateTimeConverter.PostgresToSqlServer(input));
+
+    // ── Ngày BC / năm > 9999 sang đích time ──
+    [Theory]
+    [InlineData("0044-03-15 10:30:00 BC", "10:30:00")]
+    [InlineData("10000-01-01 08:15:30.5", "08:15:30.5")]
+    [InlineData("9999-12-31 24:00:00", "00:00:00")]
+    public void OutOfRangeDate_ToTime_KeepsTime(string input, string expected) =>
+        Assert.Equal(expected, DbDateTimeConverter.PostgresToSqlServer(input, SqlServerDateType.Time));
+
+    [Fact]
+    public void OutOfRangeDate_ToPostgresTime_KeepsTime() =>
+        Assert.Equal(
+            "10:30:00.123457",
+            DbDateTimeConverter.SqlServerToPostgres("0044-03-15 10:30:00.1234567 BC", PostgresDateType.Time));
+
+    [Fact]
+    public void Infinity_ToTime_StillThrows()
+    {
+        var clamp = new DbDateTimeOptions { Infinity = InfinityHandling.ClampToRange };
+        Assert.Throws<OverflowException>(() =>
+            DbDateTimeConverter.PostgresToSqlServer("infinity", SqlServerDateType.Time, clamp));
+    }
+
+    // ── API có kiểu: thông báo lỗi vẫn mô tả đúng giá trị ──
+    [Fact]
+    public void Typed_OutOfRange_MessageDescribesValue()
+    {
+        var ex = Assert.Throws<ArgumentOutOfRangeException>(() =>
+            DbDateTimeConverter.ToSqlServer(new DateTime(1700, 1, 1), SqlServerDateType.DateTime));
+        Assert.Contains("1700-01-01", ex.Message);
+    }
+
+    [Fact]
+    public void Typed_ToPostgres_Date() =>
+        Assert.Equal("2024-01-02", DbDateTimeConverter.ToPostgres(new DateTime(2024, 1, 2, 23, 0, 0), PostgresDateType.Date));
 }

@@ -179,27 +179,7 @@ public static partial class DbDateTimeConverter
         DbDateTimeOptions? options = null) =>
         postgresValue is null
             ? null
-            : ToSqlServer(Parse(postgresValue), target, options ?? DbDateTimeOptions.Default, postgresValue.Trim());
-
-    /// <summary>
-    /// Chuyển một <see cref="DateTime"/> (vd. đọc từ Npgsql) sang chuỗi dùng được cho SQL Server.
-    /// <see cref="DateTimeKind.Utc"/> được coi là có độ lệch +00:00, <see cref="DateTimeKind.Local"/>
-    /// dùng độ lệch của máy, <see cref="DateTimeKind.Unspecified"/> là không có múi giờ.
-    /// </summary>
-    /// <inheritdoc cref="PostgresToSqlServer(string, SqlServerDateType, DbDateTimeOptions)" path="/exception"/>
-    public static string PostgresToSqlServer(
-        DateTime value,
-        SqlServerDateType target = SqlServerDateType.DateTime2,
-        DbDateTimeOptions? options = null) =>
-        ToSqlServer(FromDateTime(value), target, options ?? DbDateTimeOptions.Default, value.ToString("O", Inv));
-
-    /// <summary>Chuyển một <see cref="DateTimeOffset"/> sang chuỗi dùng được cho SQL Server.</summary>
-    /// <inheritdoc cref="PostgresToSqlServer(string, SqlServerDateType, DbDateTimeOptions)" path="/exception"/>
-    public static string PostgresToSqlServer(
-        DateTimeOffset value,
-        SqlServerDateType target = SqlServerDateType.DateTime2,
-        DbDateTimeOptions? options = null) =>
-        ToSqlServer(FromDateTimeOffset(value), target, options ?? DbDateTimeOptions.Default, value.ToString("O", Inv));
+            : ConvertToSqlServer(Parse(postgresValue), target, options ?? DbDateTimeOptions.Default, postgresValue.Trim());
 
     // ───────────────────────────── Giá trị: SQL Server → PostgreSQL ─────────────────────────────
 
@@ -218,25 +198,41 @@ public static partial class DbDateTimeConverter
         DbDateTimeOptions? options = null) =>
         sqlServerValue is null
             ? null
-            : ToPostgres(Parse(sqlServerValue), target, options ?? DbDateTimeOptions.Default, sqlServerValue.Trim());
+            : ConvertToPostgres(Parse(sqlServerValue), target, options ?? DbDateTimeOptions.Default, sqlServerValue.Trim());
 
-    /// <summary>
-    /// Chuyển một <see cref="DateTime"/> (vd. đọc từ SqlClient) sang chuỗi dùng được cho PostgreSQL.
-    /// Quy ước về <see cref="DateTime.Kind"/> giống
-    /// <see cref="PostgresToSqlServer(DateTime, SqlServerDateType, DbDateTimeOptions)"/>.
-    /// </summary>
-    public static string SqlServerToPostgres(
+    // ───────────────────────────── Giá trị .NET → chuỗi ─────────────────────────────
+    // Với giá trị đã có kiểu (vd. đọc từ Npgsql/SqlClient), kết quả chỉ phụ thuộc kiểu đích.
+    // Quy ước Kind: Utc = +00:00, Local = độ lệch của máy, Unspecified = không có múi giờ.
+
+    /// <summary>Chuyển một <see cref="DateTime"/> sang chuỗi dùng được cho SQL Server.</summary>
+    /// <inheritdoc cref="PostgresToSqlServer(string, SqlServerDateType, DbDateTimeOptions)" path="/exception"/>
+    public static string ToSqlServer(
+        DateTime value,
+        SqlServerDateType target = SqlServerDateType.DateTime2,
+        DbDateTimeOptions? options = null) =>
+        ConvertToSqlServer(FromDateTime(value), target, options ?? DbDateTimeOptions.Default, source: null);
+
+    /// <summary>Chuyển một <see cref="DateTimeOffset"/> sang chuỗi dùng được cho SQL Server.</summary>
+    /// <inheritdoc cref="PostgresToSqlServer(string, SqlServerDateType, DbDateTimeOptions)" path="/exception"/>
+    public static string ToSqlServer(
+        DateTimeOffset value,
+        SqlServerDateType target = SqlServerDateType.DateTime2,
+        DbDateTimeOptions? options = null) =>
+        ConvertToSqlServer(FromDateTimeOffset(value), target, options ?? DbDateTimeOptions.Default, source: null);
+
+    /// <summary>Chuyển một <see cref="DateTime"/> sang chuỗi dùng được cho PostgreSQL (làm tròn tới µs).</summary>
+    public static string ToPostgres(
         DateTime value,
         PostgresDateType target = PostgresDateType.Timestamp,
         DbDateTimeOptions? options = null) =>
-        ToPostgres(FromDateTime(value), target, options ?? DbDateTimeOptions.Default, value.ToString("O", Inv));
+        ConvertToPostgres(FromDateTime(value), target, options ?? DbDateTimeOptions.Default, source: null);
 
-    /// <summary>Chuyển một <see cref="DateTimeOffset"/> sang chuỗi dùng được cho PostgreSQL.</summary>
-    public static string SqlServerToPostgres(
+    /// <summary>Chuyển một <see cref="DateTimeOffset"/> sang chuỗi dùng được cho PostgreSQL (làm tròn tới µs).</summary>
+    public static string ToPostgres(
         DateTimeOffset value,
         PostgresDateType target = PostgresDateType.Timestamp,
         DbDateTimeOptions? options = null) =>
-        ToPostgres(FromDateTimeOffset(value), target, options ?? DbDateTimeOptions.Default, value.ToString("O", Inv));
+        ConvertToPostgres(FromDateTimeOffset(value), target, options ?? DbDateTimeOptions.Default, source: null);
 
     // ───────────────────────────── Làm tròn .NET ─────────────────────────────
 
@@ -299,63 +295,72 @@ public static partial class DbDateTimeConverter
     /// <summary>Làm tròn tới micro giây như PostgreSQL.</summary>
     public static DateTime RoundToPostgres(DateTime value)
     {
-        var remainder = value.Ticks % 10;
-        var ticks = value.Ticks - remainder;
-        if (remainder >= 5 && ticks + 10 <= DateTime.MaxValue.Ticks)
-        {
-            ticks += 10;
-        }
+        var ticks = RoundTicksToMicroseconds(value.Ticks);
+        // Không vượt DateTime.MaxValue: cắt bớt thay vì làm tròn lên.
+        return new DateTime(ticks > DateTime.MaxValue.Ticks ? ticks - 10 : ticks, value.Kind);
+    }
 
-        return new DateTime(ticks, value.Kind);
+    /// <summary>Làm tròn số tick (100 ns) tới micro giây, nửa trở lên làm tròn lên.</summary>
+    private static long RoundTicksToMicroseconds(long ticks)
+    {
+        var remainder = ticks % 10;
+        return ticks - remainder + (remainder >= 5 ? 10 : 0);
     }
 
     // ───────────────────────────── Lõi chuyển đổi ─────────────────────────────
 
-    /// <param name="Value">Ngày giờ (giờ địa phương theo <paramref name="Offset"/>, nếu có).</param>
+    /// <param name="Value">
+    /// Ngày giờ đã chuẩn hóa (giờ địa phương theo <paramref name="Offset"/>, nếu có).
+    /// Khi <paramref name="Overflow"/> ≠ 0 hoặc không có ngày, chỉ phần giờ của nó có nghĩa.
+    /// </param>
     /// <param name="Offset">Độ lệch múi giờ, null nếu không có.</param>
     /// <param name="HasDate">Giá trị có phần ngày.</param>
-    /// <param name="TimeTicks">Phần giờ tính bằng tick, 0 → TicksPerDay (TicksPerDay nghĩa là 24:00:00).</param>
-    /// <param name="Overflow">-1/+1 khi giá trị nằm ngoài khoảng .NET (infinity, BC, năm sau 9999).</param>
+    /// <param name="IsEndOfDay">Giá trị chỉ có giờ và bằng <c>24:00:00</c> (PostgreSQL cho phép).</param>
+    /// <param name="Overflow">-1/+1 khi ngày nằm ngoài khoảng .NET (infinity, BC, năm sau 9999).</param>
     /// <param name="IsInfinity">Giá trị là <c>infinity</c>/<c>-infinity</c>.</param>
     private readonly record struct Parsed(
-        DateTime Value, TimeSpan? Offset, bool HasDate, long TimeTicks, int Overflow, bool IsInfinity);
+        DateTime Value, TimeSpan? Offset, bool HasDate, bool IsEndOfDay, int Overflow, bool IsInfinity);
 
-    private static string ToSqlServer(Parsed p, SqlServerDateType target, DbDateTimeOptions options, string original)
+    // source: chuỗi gốc cho thông báo lỗi; null với giá trị có kiểu (mô tả chỉ được tạo khi cần).
+    private static string ConvertToSqlServer(
+        Parsed p, SqlServerDateType target, DbDateTimeOptions options, string? source)
     {
-        if (p.Overflow != 0)
+        // Ngày BC / năm > 9999 vẫn có phần giờ hợp lệ cho đích time.
+        var timeOfOverflow = target == SqlServerDateType.Time && !p.IsInfinity;
+        if (p.Overflow != 0 && !timeOfOverflow)
         {
             if (options.Infinity == InfinityHandling.ClampToRange && target != SqlServerDateType.Time)
             {
                 var (min, max) = SqlServerRange(target);
-                p = FromDateTime(p.Overflow > 0 ? max : min);
+                // Giá trị kẹp là UTC: không áp DefaultOffset (tránh tràn khi đổi sang UTC).
+                p = new Parsed(p.Overflow > 0 ? max : min, TimeSpan.Zero, true, false, 0, false);
             }
             else if (p.IsInfinity)
             {
-                throw new OverflowException($"SQL Server không biểu diễn được '{original}' cho kiểu {target}.");
+                throw new OverflowException($"SQL Server không biểu diễn được '{Describe(p, source)}' cho kiểu {target}.");
             }
             else
             {
                 throw new ArgumentOutOfRangeException(
-                    nameof(original), original, $"'{original}' nằm ngoài khoảng ngày giờ mà SQL Server hỗ trợ.");
+                    nameof(source), Describe(p, source), $"'{Describe(p, source)}' nằm ngoài khoảng ngày giờ mà SQL Server hỗ trợ.");
             }
         }
 
         switch (target)
         {
             case SqlServerDateType.Date:
-                RequireDate(p, original);
+                RequireDate(p, source);
                 return p.Value.ToString("yyyy-MM-dd", Inv);
 
             case SqlServerDateType.Time:
                 // SQL Server time tối đa 23:59:59.9999999 (không có 24:00:00).
-                var timeTicks = Math.Min(p.TimeTicks, TimeSpan.TicksPerDay - 1);
-                return new DateTime(timeTicks).ToString("HH:mm:ss.FFFFFFF", Inv);
+                return p.IsEndOfDay ? "23:59:59.9999999" : p.Value.ToString("HH:mm:ss.FFFFFFF", Inv);
 
             case SqlServerDateType.DateTimeOffset:
             {
-                RequireDate(p, original);
+                RequireDate(p, source);
                 var offset = p.Offset ?? options.DefaultOffset;
-                var utc = ToUtc(p.Value, offset, original);
+                var utc = ToUtc(p.Value, offset, source);
                 var local = p.Value;
                 if (offset.Ticks % TimeSpan.TicksPerMinute != 0 || offset.Duration() > SqlServerMaxOffset)
                 {
@@ -367,57 +372,63 @@ public static partial class DbDateTimeConverter
             }
 
             case SqlServerDateType.DateTime:
-                RequireDate(p, original);
-                return RoundToSqlServerDateTime(ToUtcIfZoned(p, original)).ToString("yyyy-MM-ddTHH:mm:ss.fff", Inv);
+                RequireDate(p, source);
+                return RoundToSqlServerDateTime(ToUtcIfZoned(p, source)).ToString("yyyy-MM-ddTHH:mm:ss.fff", Inv);
 
             case SqlServerDateType.SmallDateTime:
-                RequireDate(p, original);
-                return RoundToSmallDateTime(ToUtcIfZoned(p, original)).ToString("yyyy-MM-ddTHH:mm:ss", Inv);
+                RequireDate(p, source);
+                return RoundToSmallDateTime(ToUtcIfZoned(p, source)).ToString("yyyy-MM-ddTHH:mm:ss", Inv);
 
             case SqlServerDateType.DateTime2:
-                RequireDate(p, original);
-                return ToUtcIfZoned(p, original).ToString("yyyy-MM-ddTHH:mm:ss.FFFFFFF", Inv);
+                RequireDate(p, source);
+                return ToUtcIfZoned(p, source).ToString("yyyy-MM-ddTHH:mm:ss.FFFFFFF", Inv);
 
             default:
                 throw new ArgumentOutOfRangeException(nameof(target), target, null);
         }
     }
 
-    private static string ToPostgres(Parsed p, PostgresDateType target, DbDateTimeOptions options, string original)
+    // source: chuỗi gốc cho thông báo lỗi; null với giá trị có kiểu (mô tả chỉ được tạo khi cần).
+    private static string ConvertToPostgres(
+        Parsed p, PostgresDateType target, DbDateTimeOptions options, string? source)
     {
+        var isTime = target is PostgresDateType.Time or PostgresDateType.TimeTz;
         if (p.Overflow != 0)
         {
-            if (!p.IsInfinity)
+            if (p.IsInfinity)
             {
-                throw new ArgumentOutOfRangeException(
-                    nameof(original), original, $"'{original}' nằm ngoài khoảng ngày giờ của .NET.");
+                return isTime
+                    ? throw new OverflowException($"Kiểu {target} của PostgreSQL không nhận '{Describe(p, source)}'.")
+                    : p.Overflow > 0 ? "infinity" : "-infinity";
             }
 
-            return target is PostgresDateType.Time or PostgresDateType.TimeTz
-                ? throw new OverflowException($"Kiểu {target} của PostgreSQL không nhận '{original}'.")
-                : p.Overflow > 0 ? "infinity" : "-infinity";
+            if (!isTime)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(source), Describe(p, source), $"'{Describe(p, source)}' nằm ngoài khoảng ngày giờ của .NET.");
+            }
         }
 
         switch (target)
         {
             case PostgresDateType.Timestamp:
-                RequireDate(p, original);
-                return RoundToPostgres(ToUtcIfZoned(p, original)).ToString("yyyy-MM-dd HH:mm:ss.FFFFFF", Inv);
+                RequireDate(p, source);
+                return RoundToPostgres(ToUtcIfZoned(p, source)).ToString("yyyy-MM-dd HH:mm:ss.FFFFFF", Inv);
 
             case PostgresDateType.TimestampTz:
-                RequireDate(p, original);
+                RequireDate(p, source);
                 return RoundToPostgres(p.Value).ToString("yyyy-MM-dd HH:mm:ss.FFFFFF", Inv)
                     + FormatOffset(p.Offset ?? options.DefaultOffset);
 
             case PostgresDateType.Date:
-                RequireDate(p, original);
+                RequireDate(p, source);
                 return p.Value.ToString("yyyy-MM-dd", Inv);
 
             case PostgresDateType.Time:
-                return FormatPostgresTime(p.TimeTicks);
+                return FormatPostgresTime(p);
 
             case PostgresDateType.TimeTz:
-                return FormatPostgresTime(p.TimeTicks) + FormatOffset(p.Offset ?? options.DefaultOffset);
+                return FormatPostgresTime(p) + FormatOffset(p.Offset ?? options.DefaultOffset);
 
             default:
                 throw new ArgumentOutOfRangeException(nameof(target), target, null);
@@ -435,12 +446,11 @@ public static partial class DbDateTimeConverter
             _ => null,
         };
 
-        return new Parsed(
-            DateTime.SpecifyKind(value, DateTimeKind.Unspecified), offset, true, value.TimeOfDay.Ticks, 0, false);
+        return new Parsed(DateTime.SpecifyKind(value, DateTimeKind.Unspecified), offset, true, false, 0, false);
     }
 
     private static Parsed FromDateTimeOffset(DateTimeOffset value) =>
-        new(value.DateTime, value.Offset, true, value.TimeOfDay.Ticks, 0, false);
+        new(value.DateTime, value.Offset, true, false, 0, false);
 
     private static Parsed Parse(string text)
     {
@@ -448,12 +458,12 @@ public static partial class DbDateTimeConverter
         if (s.Equals("infinity", StringComparison.OrdinalIgnoreCase)
             || s.Equals("+infinity", StringComparison.OrdinalIgnoreCase))
         {
-            return new Parsed(DateTime.MaxValue, null, true, 0, 1, true);
+            return new Parsed(DateTime.MaxValue, null, true, false, 1, true);
         }
 
         if (s.Equals("-infinity", StringComparison.OrdinalIgnoreCase))
         {
-            return new Parsed(DateTime.MinValue, null, true, 0, -1, true);
+            return new Parsed(DateTime.MinValue, null, true, false, -1, true);
         }
 
         var m = ValueRegex().Match(s);
@@ -487,25 +497,29 @@ public static partial class DbDateTimeConverter
 
         if (!hasDate)
         {
-            return new Parsed(new DateTime(timeTicks), offset, false, timeTicks, 0, false);
+            // timeTicks = TicksPerDay khi là 24:00:00 hoặc phần lẻ giây làm tròn tràn ngày.
+            var endOfDay = timeTicks >= TimeSpan.TicksPerDay;
+            return new Parsed(new DateTime(endOfDay ? 0 : timeTicks), offset, false, endOfDay, 0, false);
         }
 
-        var yearText = m.Groups["y"].Value;
+        // Chỉ giữ phần giờ khi ngày nằm ngoài khoảng .NET (dùng cho đích time).
+        var timeOnly = new DateTime(timeTicks % TimeSpan.TicksPerDay);
+        var year = m.Groups["y"].Value.TrimStart('0');
         var monthDay = m.Groups["md"].Value;
-        if (isBc || yearText.Length > 4)
+        if (isBc || year.Length > 4)
         {
             // Ngày BC hoặc năm > 9999: hợp lệ trong PostgreSQL nhưng .NET không biểu diễn được.
-            if (yearText.TrimStart('0').Length == 0
+            if (year.Length == 0
                 || !DateTime.TryParseExact("2000" + monthDay, "yyyy-MM-dd", Inv, DateTimeStyles.None, out _))
             {
                 throw new FormatException($"Ngày không hợp lệ trong '{text}'.");
             }
 
-            var sign = isBc ? -1 : 1;
-            return new Parsed(sign > 0 ? DateTime.MaxValue : DateTime.MinValue, offset, true, timeTicks, sign, false);
+            return new Parsed(timeOnly, offset, true, false, isBc ? -1 : 1, false);
         }
 
-        if (!DateTime.TryParseExact(yearText + monthDay, "yyyy-MM-dd", Inv, DateTimeStyles.None, out var date))
+        // Năm 0000 (không có BC) không tồn tại → TryParseExact thất bại.
+        if (!DateTime.TryParseExact(year.PadLeft(4, '0') + monthDay, "yyyy-MM-dd", Inv, DateTimeStyles.None, out var date))
         {
             throw new FormatException($"Ngày không hợp lệ trong '{text}'.");
         }
@@ -513,10 +527,10 @@ public static partial class DbDateTimeConverter
         if (date.Ticks + timeTicks > DateTime.MaxValue.Ticks)
         {
             // vd. 9999-12-31 24:00:00 → sang năm 10000.
-            return new Parsed(DateTime.MaxValue, offset, true, timeTicks, 1, false);
+            return new Parsed(timeOnly, offset, true, false, 1, false);
         }
 
-        return new Parsed(date.AddTicks(timeTicks), offset, true, timeTicks, 0, false);
+        return new Parsed(date.AddTicks(timeTicks), offset, true, false, 0, false);
     }
 
     /// <summary>Phần lẻ giây (1–9 chữ số) → tick 100 ns, làm tròn chữ số thứ 8.</summary>
@@ -569,28 +583,46 @@ public static partial class DbDateTimeConverter
         return abs.Seconds != 0 ? text + abs.ToString(@"\:ss", Inv) : text;
     }
 
-    /// <summary>Làm tròn phần giờ tới micro giây; tràn qua cuối ngày thành <c>24:00:00</c> (PostgreSQL chấp nhận).</summary>
-    private static string FormatPostgresTime(long timeTicks)
+    /// <summary>
+    /// Phần giờ cho PostgreSQL, làm tròn tới micro giây. Khi làm tròn tràn qua cuối ngày:
+    /// giá trị chỉ có giờ thành <c>24:00:00</c> (PostgreSQL chấp nhận); giá trị có ngày thành
+    /// <c>00:00:00</c>, khớp với ngày đã sang hôm sau (như <c>timestamp::time</c> của PostgreSQL).
+    /// </summary>
+    private static string FormatPostgresTime(Parsed p)
     {
-        var remainder = timeTicks % 10;
-        var ticks = timeTicks - remainder + (remainder >= 5 ? 10 : 0);
-        return ticks >= TimeSpan.TicksPerDay ? "24:00:00" : new DateTime(ticks).ToString("HH:mm:ss.FFFFFF", Inv);
+        if (p.IsEndOfDay)
+        {
+            return "24:00:00";
+        }
+
+        var ticks = RoundTicksToMicroseconds(p.Value.TimeOfDay.Ticks);
+        if (ticks >= TimeSpan.TicksPerDay)
+        {
+            return p.HasDate ? "00:00:00" : "24:00:00";
+        }
+
+        return new DateTime(ticks).ToString("HH:mm:ss.FFFFFF", Inv);
     }
 
-    private static DateTime ToUtcIfZoned(Parsed p, string original) =>
-        p.Offset is { } offset ? ToUtc(p.Value, offset, original) : p.Value;
+    /// <summary>Mô tả giá trị cho thông báo lỗi: chuỗi gốc nếu có, nếu không thì định dạng ISO.</summary>
+    private static string Describe(Parsed p, string? source) =>
+        source ?? p.Value.ToString("O", Inv) + (p.Offset is { } offset ? FormatOffset(offset) : "");
+
+    private static DateTime ToUtcIfZoned(Parsed p, string? source) =>
+        p.Offset is { } offset ? ToUtc(p.Value, offset, source) : p.Value;
 
     /// <summary>
     /// Đổi sang UTC bằng phép trừ tick (không dùng <see cref="DateTimeOffset"/>, vì nó không nhận
     /// độ lệch có phần giây hoặc vượt ±14:00).
     /// </summary>
-    private static DateTime ToUtc(DateTime value, TimeSpan offset, string original)
+    private static DateTime ToUtc(DateTime value, TimeSpan offset, string? source)
     {
         var ticks = value.Ticks - offset.Ticks;
         if (ticks < 0 || ticks > DateTime.MaxValue.Ticks)
         {
+            var shown = source ?? value.ToString("O", Inv) + FormatOffset(offset);
             throw new ArgumentOutOfRangeException(
-                nameof(original), original, $"'{original}' đổi sang UTC nằm ngoài khoảng ngày giờ của .NET.");
+                nameof(source), shown, $"'{shown}' đổi sang UTC nằm ngoài khoảng ngày giờ của .NET.");
         }
 
         return new DateTime(ticks);
@@ -604,11 +636,11 @@ public static partial class DbDateTimeConverter
         _ => (DateTime.MinValue, DateTime.MaxValue),
     };
 
-    private static void RequireDate(Parsed p, string original)
+    private static void RequireDate(Parsed p, string? source)
     {
         if (!p.HasDate)
         {
-            throw new FormatException($"Giá trị '{original}' thiếu phần ngày.");
+            throw new FormatException($"Giá trị '{Describe(p, source)}' thiếu phần ngày.");
         }
     }
 
