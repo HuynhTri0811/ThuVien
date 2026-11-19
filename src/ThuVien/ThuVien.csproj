@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>ThuVien</RootNamespace>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+
+    <!-- Thông tin gói NuGet -->
+    <PackageId>ThuVien</PackageId>
+    <Version>1.0.0</Version>
+    <Description>Bộ tiện ích tiếng Việt cho .NET: bỏ dấu, tạo slug, đọc số thành chữ, kiểm tra số điện thoại, định dạng tiền VND.</Description>
+    <PackageTags>vietnamese;tieng-viet;slug;number-to-words;vnd</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+</Project>
