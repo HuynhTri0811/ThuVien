@@ -688,10 +688,10 @@ public static partial class DbDateTimeConverter
         return (WhitespaceRegex().Replace(lower, " ").Trim(), precision);
     }
 
-    [GeneratedRegex(@"^(?:(?<y>\d{4,})(?<md>-\d{2}-\d{2})(?:[ T]|$))?(?:(?<h>\d{2}):(?<mi>\d{2})(?::(?<s>\d{2})(?:\.(?<f>\d{1,9}))?)?)?\s*(?<off>Z|[+-]\d{2}(?::?\d{2}(?::?\d{2})?)?)?(?:\s*(?<bc>BC))?$", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"^(?:(?<y>[0-9]{4,})(?<md>-[0-9]{2}-[0-9]{2})(?:[ T]|$))?(?:(?<h>[0-9]{2}):(?<mi>[0-9]{2})(?::(?<s>[0-9]{2})(?:\.(?<f>[0-9]{1,9}))?)?)?\s*(?<off>Z|[+-][0-9]{2}(?::?[0-9]{2}(?::?[0-9]{2})?)?)?(?:\s*(?<bc>BC))?$", RegexOptions.IgnoreCase)]
     private static partial Regex ValueRegex();
 
-    [GeneratedRegex(@"\s*\(\s*(\d+)\s*\)\s*")]
+    [GeneratedRegex(@"\s*\(\s*([0-9]+)\s*\)\s*")]
     private static partial Regex PrecisionRegex();
 
     [GeneratedRegex(@"\s+")]

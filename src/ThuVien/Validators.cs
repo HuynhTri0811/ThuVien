@@ -82,7 +82,7 @@ public static partial class Validators
     private static string NormalizePhone(string phone) =>
         phone.Replace(" ", "").Replace(".", "").Replace("-", "").Trim();
 
-    [GeneratedRegex(@"^(0|\+84|84)(3|5|7|8|9)\d{8}$")]
+    [GeneratedRegex(@"^(0|\+84|84)(3|5|7|8|9)[0-9]{8}$")]
     private static partial Regex PhoneRegex();
 
 }
