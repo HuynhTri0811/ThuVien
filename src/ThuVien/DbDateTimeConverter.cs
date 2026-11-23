@@ -501,8 +501,7 @@ public static partial class DbDateTimeConverter
         if (isBc || year.Length > 4)
         {
             // Ngày BC hoặc năm > 9999: hợp lệ trong PostgreSQL nhưng .NET không biểu diễn được.
-            if (year.Length == 0
-                || !DateTime.TryParseExact("2000" + monthDay, "yyyy-MM-dd", Inv, DateTimeStyles.None, out _))
+            if (year.Length == 0 || !IsValidMonthDay(year, isBc, monthDay))
             {
                 throw new FormatException($"Ngày không hợp lệ trong '{text}'.");
             }
@@ -523,6 +522,36 @@ public static partial class DbDateTimeConverter
         }
 
         return new Parsed(date.AddTicks(timeTicks), offset, true, false, 0, false);
+    }
+
+    /// <summary>
+    /// Kiểm tra tháng/ngày (dạng <c>-MM-dd</c>) theo lịch Gregory đón trước của PostgreSQL.
+    /// Năm BC N tương ứng năm thiên văn 1 − N, nên 1 BC, 5 BC, … là năm nhuận.
+    /// </summary>
+    private static bool IsValidMonthDay(string year, bool isBc, string monthDay)
+    {
+        var month = int.Parse(monthDay.AsSpan(1, 2), Inv);
+        var day = int.Parse(monthDay.AsSpan(4, 2), Inv);
+        if (month is < 1 or > 12 || day < 1)
+        {
+            return false;
+        }
+
+        // Chỉ cần năm theo modulo 400 để xác định năm nhuận (tránh tràn số với năm rất lớn).
+        var mod400 = 0;
+        foreach (var c in year)
+        {
+            mod400 = (mod400 * 10 + (c - '0')) % 400;
+        }
+
+        if (isBc)
+        {
+            // Năm thiên văn 1 − N ≡ (401 − N mod 400) (mod 400).
+            mod400 = (401 - mod400) % 400;
+        }
+
+        var isLeap = mod400 % 4 == 0 && (mod400 % 100 != 0 || mod400 == 0);
+        return day <= DateTime.DaysInMonth(isLeap ? 2000 : 2001, month);
     }
 
     /// <summary>Phần lẻ giây (1–9 chữ số) → tick 100 ns, làm tròn chữ số thứ 8.</summary>

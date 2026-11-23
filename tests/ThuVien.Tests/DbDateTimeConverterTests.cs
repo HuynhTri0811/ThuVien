@@ -293,6 +293,11 @@ public class DbDateTimeIssue4Tests
     [InlineData("0044-03-15 bc", SqlServerDateType.DateTime, "1753-01-01T00:00:00.000")]
     [InlineData("10000-01-01 00:00:00", SqlServerDateType.DateTime, "9999-12-31T23:59:59.997")]
     [InlineData("294276-12-31 23:59:59", SqlServerDateType.SmallDateTime, "2079-06-06T23:59:00")]
+    [InlineData("10004-02-29", SqlServerDateType.DateTime2, "9999-12-31T23:59:59.9999999")]
+    [InlineData("10400-02-29", SqlServerDateType.DateTime2, "9999-12-31T23:59:59.9999999")]
+    [InlineData("0001-02-29 BC", SqlServerDateType.DateTime2, "0001-01-01T00:00:00")]
+    [InlineData("0005-02-29 BC", SqlServerDateType.DateTime2, "0001-01-01T00:00:00")]
+    [InlineData("0401-02-29 BC", SqlServerDateType.DateTime2, "0001-01-01T00:00:00")]
     public void OutsideDotNetRange_ClampToRange(string input, SqlServerDateType target, string expected) =>
         Assert.Equal(expected, DbDateTimeConverter.PostgresToSqlServer(input, target, Clamp));
 
@@ -300,6 +305,12 @@ public class DbDateTimeIssue4Tests
     [InlineData("0000-01-01 00:00:00 BC")]
     [InlineData("0044-13-15 BC")]
     [InlineData("12:00:00 BC")]
+    [InlineData("10001-02-29")]
+    [InlineData("10100-02-29")]
+    [InlineData("0002-02-29 BC")]
+    [InlineData("0101-02-29 BC")]
+    [InlineData("10001-04-31")]
+    [InlineData("10001-02-00")]
     public void InvalidBc_ThrowsFormatException(string input) =>
         Assert.Throws<FormatException>(() => DbDateTimeConverter.PostgresToSqlServer(input, SqlServerDateType.DateTime2, Clamp));
 
