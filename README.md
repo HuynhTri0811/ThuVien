@@ -10,6 +10,8 @@ Bộ tiện ích tiếng Việt cho .NET 10.
 | | `ToSlug` | `"Xin chào, Việt Nam!"` → `"xin-chao-viet-nam"` |
 | `NumberToWords` | `ToVietnamese` | `1005` → `"một nghìn không trăm linh năm"` |
 | | `ToVietnameseCurrency` | `125000` → `"Một trăm hai mươi lăm nghìn đồng"` |
+| `WordsToNumber` | `FromVietnamese` | `"một nghìn không trăm linh năm"` → `1005` |
+| | `TryFromVietnamese` | `"hai mươi tư"` → `true`, `24` |
 | `Validators` | `IsVietnamesePhone` | `"+84 912 345 678"` → `true` |
 | | `NormalizeVietnamesePhone` | `"+84 912 345 678"` → `"0912345678"` |
 | | `IsEmail` | `"a@b.vn"` → `true` |
@@ -57,6 +59,16 @@ Quy tắc chính:
 - Ngày trước Công nguyên (`BC`) và năm sau 9999 cũng gây `ArgumentOutOfRangeException`, trừ khi dùng `InfinityHandling.ClampToRange` (giá trị kẹp được coi là UTC, ghi `+00:00`). Sang kiểu `time`, phần giờ của chúng vẫn được giữ.
 - `interval` không có kiểu tương đương trong SQL Server nên sẽ gây `NotSupportedException`.
 
+## Đọc chữ thành số
+
+`WordsToNumber.FromVietnamese` là chiều ngược của `NumberToWords`: đọc lại được mọi chuỗi mà `ToVietnamese` / `ToVietnameseCurrency` sinh ra, cùng các cách viết phổ biến.
+
+- Không phân biệt hoa thường; chấp nhận `ngàn`/`nghìn`, `tỉ`/`tỷ`, `lẻ`/`linh`, `bẩy`/`bảy`; sau `mươi` nhận `mốt`/`một`, `tư`/`bốn`, `lăm`/`nhăm`/`năm`.
+- Tiền tố `âm` hoặc `trừ`; hậu tố `đồng` hoặc `đồng chẵn`; dấu phẩy, chấm, gạch ngang được coi như khoảng trắng.
+- Nhóm không đọc đủ vẫn hiểu theo giá trị: `"hai nghìn hai mươi"` → `2020`.
+- Cách nói tắt mơ hồ bị từ chối: `"một trăm năm"` phải viết `"một trăm linh năm"` (105) hoặc `"một trăm năm mươi"` (150).
+- Chuỗi không hợp lệ gây `FormatException`, vượt khoảng `long` gây `OverflowException`. Dùng `TryFromVietnamese` nếu không muốn bắt lỗi.
+
 ## Sử dụng
 
 ```csharp
@@ -64,6 +76,7 @@ using ThuVien;
 
 Console.WriteLine(VietnameseText.ToSlug("Đà Lạt mộng mơ"));      // da-lat-mong-mo
 Console.WriteLine(NumberToWords.ToVietnamese(2_500_000));        // hai triệu năm trăm nghìn
+Console.WriteLine(WordsToNumber.FromVietnamese("Hai triệu năm trăm ngàn đồng")); // 2500000
 Console.WriteLine(CurrencyFormatter.ToVnd(1234567));             // 1.234.567 ₫
 ```
 
