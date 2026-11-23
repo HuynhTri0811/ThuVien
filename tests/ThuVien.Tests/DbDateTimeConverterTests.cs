@@ -429,3 +429,41 @@ public class DbDateTimeReview2Tests
     public void Typed_ToPostgres_Date() =>
         Assert.Equal("2024-01-02", DbDateTimeConverter.ToPostgres(new DateTime(2024, 1, 2, 23, 0, 0), PostgresDateType.Date));
 }
+
+public class DbDateTimeSqlDateTimeRoundingTests
+{
+    [Theory]
+    [InlineData(16_000L)]          // .0016
+    [InlineData(49_000L)]          // .0049
+    [InlineData(83_334L)]          // .0083334
+    [InlineData(9_984_000L)]       // .9984
+    [InlineData(9_983_333L)]
+    [InlineData(9_999_999L)]
+    [InlineData(16_666L)]
+    [InlineData(16_667L)]
+    [InlineData(50_000L)]
+    [InlineData(1_234_567L)]
+    public void MatchesSqlDateTime(long extraTicks)
+    {
+        var value = new DateTime(2024, 1, 2, 3, 4, 5).AddTicks(extraTicks);
+        Assert.Equal(new System.Data.SqlTypes.SqlDateTime(value).Value, DbDateTimeConverter.RoundToSqlServerDateTime(value));
+    }
+
+    [Fact]
+    public void RoundsIntoNextDay()
+    {
+        var value = new DateTime(2024, 1, 2, 23, 59, 59).AddTicks(9_984_000);
+        Assert.Equal(new DateTime(2024, 1, 3), DbDateTimeConverter.RoundToSqlServerDateTime(value));
+    }
+
+    [Fact]
+    public void MatchesSqlDateTime_Sweep()
+    {
+        var start = new DateTime(2024, 1, 2, 3, 4, 5);
+        for (long t = 0; t < TimeSpan.TicksPerSecond; t += 997)
+        {
+            var value = start.AddTicks(t);
+            Assert.Equal(new System.Data.SqlTypes.SqlDateTime(value).Value, DbDateTimeConverter.RoundToSqlServerDateTime(value));
+        }
+    }
+}

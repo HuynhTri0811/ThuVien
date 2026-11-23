@@ -248,20 +248,12 @@ public static partial class DbDateTimeConverter
             throw OutOfRange(value, "datetime");
         }
 
-        var secondStart = value.Ticks - value.Ticks % TimeSpan.TicksPerSecond;
-        var ms = (int)Math.Round(
-            (double)(value.Ticks % TimeSpan.TicksPerSecond) / TimeSpan.TicksPerMillisecond,
-            MidpointRounding.AwayFromZero);
-        var last = ms % 10;
-        ms += last switch
-        {
-            0 or 1 => -last,
-            <= 4 => 3 - last,
-            <= 8 => 7 - last,
-            _ => 1,
-        };
-
-        var ticks = secondStart + ms * TimeSpan.TicksPerMillisecond;
+        // Giống SqlDateTime: làm tròn trực tiếp phần giờ trong ngày theo bước 1/300 giây,
+        // rồi đổi bước về mili giây nguyên (0 → .000, 1 → .003, 2 → .007).
+        var dayStart = value.Ticks - value.Ticks % TimeSpan.TicksPerDay;
+        var units = (value.Ticks % TimeSpan.TicksPerDay * 3 + 50_000) / 100_000;
+        var ms = (units * 10 + 1) / 3;
+        var ticks = dayStart + ms * TimeSpan.TicksPerMillisecond;
         if (ticks > SqlDateTimeMax.Ticks)
         {
             throw OutOfRange(value, "datetime");
