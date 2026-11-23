@@ -66,6 +66,8 @@ public class ValidatorsTests
     [InlineData("84 912.345.678", true)]
     [InlineData("0212345678", false)]
     [InlineData("091234567", false)]
+    [InlineData("09\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668", false)]
+    [InlineData("09\uFF11\uFF12\uFF13\uFF14\uFF15\uFF16\uFF17\uFF18", false)]
     [InlineData("", false)]
     [InlineData(null, false)]
     public void IsVietnamesePhone_Works(string? input, bool expected) =>
@@ -76,6 +78,7 @@ public class ValidatorsTests
     [InlineData("84912345678", "0912345678")]
     [InlineData("0912-345-678", "0912345678")]
     [InlineData("abc", null)]
+    [InlineData("09\u0661\u0662\u0663\u0664\u0665\u0666\u0667\u0668", null)]
     public void NormalizeVietnamesePhone_Works(string input, string? expected) =>
         Assert.Equal(expected, Validators.NormalizeVietnamesePhone(input));
 
@@ -84,8 +87,33 @@ public class ValidatorsTests
     [InlineData("ten.ho@congty.com.vn", true)]
     [InlineData("khong-hop-le", false)]
     [InlineData("a@b", false)]
+    [InlineData("a@.b", false)]
+    [InlineData("a@b.", false)]
+    [InlineData("@b.vn", false)]
+    [InlineData("a@b@c.vn", false)]
+    [InlineData("a b@c.vn", false)]
+    [InlineData("a@b.c.", true)]
     public void IsEmail_Works(string input, bool expected) =>
         Assert.Equal(expected, Validators.IsEmail(input));
+
+    [Fact]
+    public void IsEmail_LongAdversarialInput_IsFastAndFalse()
+    {
+        var input = "a@" + new string('.', 32_000) + "@";
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        Assert.False(Validators.IsEmail(input));
+        Assert.True(watch.Elapsed < TimeSpan.FromMilliseconds(200), $"Mất {watch.Elapsed}");
+    }
+
+    [Fact]
+    public void IsEmail_RejectsOverMaxLength()
+    {
+        var local = new string('a', 64);
+        var ok = local + "@" + new string('b', Validators.MaxEmailLength - 64 - 4) + ".vn";
+        Assert.Equal(Validators.MaxEmailLength, ok.Length);
+        Assert.True(Validators.IsEmail(ok));
+        Assert.False(Validators.IsEmail("a" + ok));
+    }
 }
 
 public class CurrencyFormatterTests

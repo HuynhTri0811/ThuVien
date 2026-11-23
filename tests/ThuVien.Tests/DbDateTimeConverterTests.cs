@@ -293,6 +293,11 @@ public class DbDateTimeIssue4Tests
     [InlineData("0044-03-15 bc", SqlServerDateType.DateTime, "1753-01-01T00:00:00.000")]
     [InlineData("10000-01-01 00:00:00", SqlServerDateType.DateTime, "9999-12-31T23:59:59.997")]
     [InlineData("294276-12-31 23:59:59", SqlServerDateType.SmallDateTime, "2079-06-06T23:59:00")]
+    [InlineData("10004-02-29", SqlServerDateType.DateTime2, "9999-12-31T23:59:59.9999999")]
+    [InlineData("10400-02-29", SqlServerDateType.DateTime2, "9999-12-31T23:59:59.9999999")]
+    [InlineData("0001-02-29 BC", SqlServerDateType.DateTime2, "0001-01-01T00:00:00")]
+    [InlineData("0005-02-29 BC", SqlServerDateType.DateTime2, "0001-01-01T00:00:00")]
+    [InlineData("0401-02-29 BC", SqlServerDateType.DateTime2, "0001-01-01T00:00:00")]
     public void OutsideDotNetRange_ClampToRange(string input, SqlServerDateType target, string expected) =>
         Assert.Equal(expected, DbDateTimeConverter.PostgresToSqlServer(input, target, Clamp));
 
@@ -300,6 +305,12 @@ public class DbDateTimeIssue4Tests
     [InlineData("0000-01-01 00:00:00 BC")]
     [InlineData("0044-13-15 BC")]
     [InlineData("12:00:00 BC")]
+    [InlineData("10001-02-29")]
+    [InlineData("10100-02-29")]
+    [InlineData("0002-02-29 BC")]
+    [InlineData("0101-02-29 BC")]
+    [InlineData("10001-04-31")]
+    [InlineData("10001-02-00")]
     public void InvalidBc_ThrowsFormatException(string input) =>
         Assert.Throws<FormatException>(() => DbDateTimeConverter.PostgresToSqlServer(input, SqlServerDateType.DateTime2, Clamp));
 
@@ -428,4 +439,42 @@ public class DbDateTimeReview2Tests
     [Fact]
     public void Typed_ToPostgres_Date() =>
         Assert.Equal("2024-01-02", DbDateTimeConverter.ToPostgres(new DateTime(2024, 1, 2, 23, 0, 0), PostgresDateType.Date));
+}
+
+public class DbDateTimeSqlDateTimeRoundingTests
+{
+    [Theory]
+    [InlineData(16_000L)]          // .0016
+    [InlineData(49_000L)]          // .0049
+    [InlineData(83_334L)]          // .0083334
+    [InlineData(9_984_000L)]       // .9984
+    [InlineData(9_983_333L)]
+    [InlineData(9_999_999L)]
+    [InlineData(16_666L)]
+    [InlineData(16_667L)]
+    [InlineData(50_000L)]
+    [InlineData(1_234_567L)]
+    public void MatchesSqlDateTime(long extraTicks)
+    {
+        var value = new DateTime(2024, 1, 2, 3, 4, 5).AddTicks(extraTicks);
+        Assert.Equal(new System.Data.SqlTypes.SqlDateTime(value).Value, DbDateTimeConverter.RoundToSqlServerDateTime(value));
+    }
+
+    [Fact]
+    public void RoundsIntoNextDay()
+    {
+        var value = new DateTime(2024, 1, 2, 23, 59, 59).AddTicks(9_984_000);
+        Assert.Equal(new DateTime(2024, 1, 3), DbDateTimeConverter.RoundToSqlServerDateTime(value));
+    }
+
+    [Fact]
+    public void MatchesSqlDateTime_Sweep()
+    {
+        var start = new DateTime(2024, 1, 2, 3, 4, 5);
+        for (long t = 0; t < TimeSpan.TicksPerSecond; t += 997)
+        {
+            var value = start.AddTicks(t);
+            Assert.Equal(new System.Data.SqlTypes.SqlDateTime(value).Value, DbDateTimeConverter.RoundToSqlServerDateTime(value));
+        }
+    }
 }

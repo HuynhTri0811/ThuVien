@@ -248,20 +248,12 @@ public static partial class DbDateTimeConverter
             throw OutOfRange(value, "datetime");
         }
 
-        var secondStart = value.Ticks - value.Ticks % TimeSpan.TicksPerSecond;
-        var ms = (int)Math.Round(
-            (double)(value.Ticks % TimeSpan.TicksPerSecond) / TimeSpan.TicksPerMillisecond,
-            MidpointRounding.AwayFromZero);
-        var last = ms % 10;
-        ms += last switch
-        {
-            0 or 1 => -last,
-            <= 4 => 3 - last,
-            <= 8 => 7 - last,
-            _ => 1,
-        };
-
-        var ticks = secondStart + ms * TimeSpan.TicksPerMillisecond;
+        // Giống SqlDateTime: làm tròn trực tiếp phần giờ trong ngày theo bước 1/300 giây,
+        // rồi đổi bước về mili giây nguyên (0 → .000, 1 → .003, 2 → .007).
+        var dayStart = value.Ticks - value.Ticks % TimeSpan.TicksPerDay;
+        var units = (value.Ticks % TimeSpan.TicksPerDay * 3 + 50_000) / 100_000;
+        var ms = (units * 10 + 1) / 3;
+        var ticks = dayStart + ms * TimeSpan.TicksPerMillisecond;
         if (ticks > SqlDateTimeMax.Ticks)
         {
             throw OutOfRange(value, "datetime");
@@ -509,8 +501,7 @@ public static partial class DbDateTimeConverter
         if (isBc || year.Length > 4)
         {
             // Ngày BC hoặc năm > 9999: hợp lệ trong PostgreSQL nhưng .NET không biểu diễn được.
-            if (year.Length == 0
-                || !DateTime.TryParseExact("2000" + monthDay, "yyyy-MM-dd", Inv, DateTimeStyles.None, out _))
+            if (year.Length == 0 || !IsValidMonthDay(year, isBc, monthDay))
             {
                 throw new FormatException($"Ngày không hợp lệ trong '{text}'.");
             }
@@ -531,6 +522,36 @@ public static partial class DbDateTimeConverter
         }
 
         return new Parsed(date.AddTicks(timeTicks), offset, true, false, 0, false);
+    }
+
+    /// <summary>
+    /// Kiểm tra tháng/ngày (dạng <c>-MM-dd</c>) theo lịch Gregory đón trước của PostgreSQL.
+    /// Năm BC N tương ứng năm thiên văn 1 − N, nên 1 BC, 5 BC, … là năm nhuận.
+    /// </summary>
+    private static bool IsValidMonthDay(string year, bool isBc, string monthDay)
+    {
+        var month = int.Parse(monthDay.AsSpan(1, 2), Inv);
+        var day = int.Parse(monthDay.AsSpan(4, 2), Inv);
+        if (month is < 1 or > 12 || day < 1)
+        {
+            return false;
+        }
+
+        // Chỉ cần năm theo modulo 400 để xác định năm nhuận (tránh tràn số với năm rất lớn).
+        var mod400 = 0;
+        foreach (var c in year)
+        {
+            mod400 = (mod400 * 10 + (c - '0')) % 400;
+        }
+
+        if (isBc)
+        {
+            // Năm thiên văn 1 − N ≡ (401 − N mod 400) (mod 400).
+            mod400 = (401 - mod400) % 400;
+        }
+
+        var isLeap = mod400 % 4 == 0 && (mod400 % 100 != 0 || mod400 == 0);
+        return day <= DateTime.DaysInMonth(isLeap ? 2000 : 2001, month);
     }
 
     /// <summary>Phần lẻ giây (1–9 chữ số) → tick 100 ns, làm tròn chữ số thứ 8.</summary>
@@ -667,10 +688,10 @@ public static partial class DbDateTimeConverter
         return (WhitespaceRegex().Replace(lower, " ").Trim(), precision);
     }
 
-    [GeneratedRegex(@"^(?:(?<y>\d{4,})(?<md>-\d{2}-\d{2})(?:[ T]|$))?(?:(?<h>\d{2}):(?<mi>\d{2})(?::(?<s>\d{2})(?:\.(?<f>\d{1,9}))?)?)?\s*(?<off>Z|[+-]\d{2}(?::?\d{2}(?::?\d{2})?)?)?(?:\s*(?<bc>BC))?$", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"^(?:(?<y>[0-9]{4,})(?<md>-[0-9]{2}-[0-9]{2})(?:[ T]|$))?(?:(?<h>[0-9]{2}):(?<mi>[0-9]{2})(?::(?<s>[0-9]{2})(?:\.(?<f>[0-9]{1,9}))?)?)?\s*(?<off>Z|[+-][0-9]{2}(?::?[0-9]{2}(?::?[0-9]{2})?)?)?(?:\s*(?<bc>BC))?$", RegexOptions.IgnoreCase)]
     private static partial Regex ValueRegex();
 
-    [GeneratedRegex(@"\s*\(\s*(\d+)\s*\)\s*")]
+    [GeneratedRegex(@"\s*\(\s*([0-9]+)\s*\)\s*")]
     private static partial Regex PrecisionRegex();
 
     [GeneratedRegex(@"\s+")]
