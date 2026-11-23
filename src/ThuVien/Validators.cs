@@ -45,11 +45,39 @@ public static partial class Validators
         return digits;
     }
 
+    /// <summary>Độ dài tối đa của địa chỉ email (RFC 5321).</summary>
+    public const int MaxEmailLength = 254;
+
     /// <summary>
-    /// Kiểm tra định dạng email cơ bản.
+    /// Kiểm tra định dạng email cơ bản: đúng một ký tự <c>@</c>, không có khoảng trắng,
+    /// phần tên miền có dấu chấm không nằm ở đầu/cuối, tổng độ dài không quá
+    /// <see cref="MaxEmailLength"/> ký tự. Thời gian chạy tuyến tính theo độ dài chuỗi.
     /// </summary>
-    public static bool IsEmail(string? email) =>
-        !string.IsNullOrWhiteSpace(email) && EmailRegex().IsMatch(email);
+    public static bool IsEmail(string? email)
+    {
+        if (string.IsNullOrWhiteSpace(email) || email.Length > MaxEmailLength)
+        {
+            return false;
+        }
+
+        var at = email.IndexOf('@');
+        if (at <= 0 || at == email.Length - 1 || email.IndexOf('@', at + 1) >= 0)
+        {
+            return false;
+        }
+
+        foreach (var c in email)
+        {
+            if (char.IsWhiteSpace(c))
+            {
+                return false;
+            }
+        }
+
+        // Tên miền phải có ít nhất một dấu chấm với ký tự ở cả hai phía.
+        var domain = email.AsSpan(at + 1);
+        return domain.Length >= 3 && domain[1..^1].Contains('.');
+    }
 
     private static string NormalizePhone(string phone) =>
         phone.Replace(" ", "").Replace(".", "").Replace("-", "").Trim();
@@ -57,6 +85,4 @@ public static partial class Validators
     [GeneratedRegex(@"^(0|\+84|84)(3|5|7|8|9)\d{8}$")]
     private static partial Regex PhoneRegex();
 
-    [GeneratedRegex(@"^[^@\s]+@[^@\s]+\.[^@\s]+$")]
-    private static partial Regex EmailRegex();
 }

@@ -84,8 +84,33 @@ public class ValidatorsTests
     [InlineData("ten.ho@congty.com.vn", true)]
     [InlineData("khong-hop-le", false)]
     [InlineData("a@b", false)]
+    [InlineData("a@.b", false)]
+    [InlineData("a@b.", false)]
+    [InlineData("@b.vn", false)]
+    [InlineData("a@b@c.vn", false)]
+    [InlineData("a b@c.vn", false)]
+    [InlineData("a@b.c.", true)]
     public void IsEmail_Works(string input, bool expected) =>
         Assert.Equal(expected, Validators.IsEmail(input));
+
+    [Fact]
+    public void IsEmail_LongAdversarialInput_IsFastAndFalse()
+    {
+        var input = "a@" + new string('.', 32_000) + "@";
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        Assert.False(Validators.IsEmail(input));
+        Assert.True(watch.Elapsed < TimeSpan.FromMilliseconds(200), $"Mất {watch.Elapsed}");
+    }
+
+    [Fact]
+    public void IsEmail_RejectsOverMaxLength()
+    {
+        var local = new string('a', 64);
+        var ok = local + "@" + new string('b', Validators.MaxEmailLength - 64 - 4) + ".vn";
+        Assert.Equal(Validators.MaxEmailLength, ok.Length);
+        Assert.True(Validators.IsEmail(ok));
+        Assert.False(Validators.IsEmail("a" + ok));
+    }
 }
 
 public class CurrencyFormatterTests
