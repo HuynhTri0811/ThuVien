@@ -11,10 +11,14 @@
     <!-- Thông tin gói NuGet -->
     <PackageId>ThuVien</PackageId>
     <Version>1.0.0</Version>
-    <Description>Bộ tiện ích tiếng Việt cho .NET: bỏ dấu, tạo slug, đọc số thành chữ, kiểm tra số điện thoại, định dạng tiền VND.</Description>
-    <PackageTags>vietnamese;tieng-viet;slug;number-to-words;vnd</PackageTags>
+    <Description>Bộ tiện ích tiếng Việt cho .NET: bỏ dấu, tạo slug, đọc số thành chữ, đọc chữ thành số, kiểm tra số điện thoại và email (kèm tra máy chủ mail), định dạng tiền VND.</Description>
+    <PackageTags>vietnamese;tieng-viet;slug;number-to-words;vnd;email-validation</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="ThuVien.Tests" />
+  </ItemGroup>
 
   <ItemGroup>
     <None Include="../../README.md" Pack="true" PackagePath="/" />

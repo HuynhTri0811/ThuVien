@@ -15,6 +15,9 @@ Bộ tiện ích tiếng Việt cho .NET 10.
 | `Validators` | `IsVietnamesePhone` | `"+84 912 345 678"` → `true` |
 | | `NormalizeVietnamesePhone` | `"+84 912 345 678"` → `"0912345678"` |
 | | `IsEmail` | `"a@b.vn"` → `true` |
+| `EmailValidator` | `Validate` | `"An@Thư.VN"` → hợp lệ, `NormalizedEmail = "An@thư.vn"` |
+| | `ValidateWithMailServerAsync` | `"an@example.com"` → `EmailError.NullMx` (tên miền không nhận mail) |
+| | `SuggestCorrection` | `"an@gmial.com"` → `"an@gmail.com"` |
 | `CurrencyFormatter` | `ToVnd` | `1234567m` → `"1.234.567 ₫"` |
 | `DbDateTimeConverter` | `PostgresTypeToSqlServer` | `"timestamptz(3)"` → `"datetimeoffset(3)"` |
 | | `SqlServerTypeToPostgres` | `"datetime"` → `"timestamp(3)"` |
@@ -69,6 +72,37 @@ Quy tắc chính:
 - Cách nói tắt mơ hồ bị từ chối: `"một trăm năm"` phải viết `"một trăm linh năm"` (105) hoặc `"một trăm năm mươi"` (150).
 - Chuỗi không hợp lệ gây `FormatException`, vượt khoảng `long` gây `OverflowException`. Dùng `TryFromVietnamese` nếu không muốn bắt lỗi.
 
+## Kiểm tra email
+
+`Validators.IsEmail` chỉ kiểm tra rất cơ bản. `EmailValidator` kiểm tra kỹ hơn và cho biết lý do:
+
+```csharp
+var r = EmailValidator.Validate("  An.Nguyen@Thư.VN ");
+r.IsValid;          // true
+r.NormalizedEmail;  // "An.Nguyen@thư.vn"       (tên miền viết thường)
+r.AsciiEmail;       // "An.Nguyen@xn--th-e0a.vn" (dạng gửi mail được)
+
+EmailValidator.Validate("an..b@gmial.com").Message;  // "Phần tên trước @ có ký tự không hợp lệ hoặc dấu chấm sai vị trí."
+EmailValidator.SuggestCorrection("an@gmial.com");    // "an@gmail.com"
+
+// Tra DNS xem tên miền có máy chủ nhận mail không (cần mạng)
+var m = await EmailValidator.ValidateWithMailServerAsync("an@gmail.com");
+m.IsValid;      // true
+m.MailServers;  // [5 gmail-smtp-in.l.google.com, 10 alt1.gmail-smtp-in.l.google.com, ...]
+```
+
+Quy tắc chính:
+- Cú pháp theo RFC 5321/5322: tối đa 254 ký tự; phần tên tối đa 64 ký tự gồm chữ, số, `` !#$%&'*+-/=?^_`{|}~ `` và dấu chấm (không ở đầu/cuối, không liền nhau); tên miền gồm các nhãn 1–63 ký tự chữ/số/gạch ngang và phải có đuôi (vd. `.vn`).
+- Tên miền tiếng Việt (IDN) như `thư.vn` được chấp nhận và đổi sang Punycode trong `AsciiEmail`.
+- Không hỗ trợ phần tên trong ngoặc kép, phần tên có dấu tiếng Việt (SMTPUTF8), hay địa chỉ IP thay tên miền.
+- `Suggestion` gợi ý khi tên miền gần giống nhà cung cấp phổ biến (Gmail, Yahoo, Outlook, iCloud, ...). Đây chỉ là gợi ý, không ảnh hưởng `IsValid`.
+- `ValidateWithMailServerAsync` gửi truy vấn DNS trực tiếp tới máy chủ DNS của hệ thống (UDP, tự chuyển TCP khi cần), không cần thư viện ngoài:
+  - Có bản ghi MX → hợp lệ. Không có MX nhưng có A/AAAA → hợp lệ (RFC 5321 §5.1).
+  - Null MX (RFC 7505) → `NullMx`; tên miền không tồn tại → `DomainNotFound`; không có bản ghi nào → `NoMailServer`.
+  - DNS không trả lời hoặc lỗi → `DnsLookupFailed`. Đây là lỗi tạm thời, nên cho thử lại thay vì từ chối người dùng.
+- Có máy chủ mail không có nghĩa là hộp thư tồn tại; muốn chắc chắn vẫn cần gửi mail xác nhận.
+- Dùng máy chủ DNS riêng hoặc đổi thời gian chờ: `new DnsMxResolver([new IPEndPoint(IPAddress.Parse("1.1.1.1"), 53)], TimeSpan.FromSeconds(2))`. Cài `IMailServerResolver` để tự tra theo cách khác (vd. trong test).
+
 ## Sử dụng
 
 ```csharp
@@ -85,5 +119,6 @@ Console.WriteLine(CurrencyFormatter.ToVnd(1234567));             // 1.234.567 �
 ```bash
 dotnet build          # build
 dotnet test           # chạy unit test
+THUVIEN_NETWORK_TESTS=1 dotnet test   # chạy thêm test tra DNS thật (cần mạng)
 dotnet pack src/ThuVien -c Release -o artifacts   # tạo gói NuGet
 ```
