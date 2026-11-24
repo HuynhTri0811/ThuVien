@@ -87,6 +87,8 @@ public class EmailValidatorSyntaxTests
         Assert.True(result.IsValid);
         Assert.Equal("An.Nguyen@thư.vn", result.NormalizedEmail);
         Assert.Equal("An.Nguyen@xn--th-e0a.vn", result.AsciiEmail);
+        Assert.False(result.MailServerChecked);
+        Assert.Empty(result.MailServers);
     }
 
     [Fact]
@@ -143,6 +145,51 @@ public class EmailValidatorSyntaxTests
     [InlineData("kitten", "sitting", 3)]
     public void Distance_Works(string a, string b, int expected) =>
         Assert.Equal(expected, EmailValidator.Distance(a, b));
+}
+
+public class EmailValidatorMailServerTests
+{
+    private sealed class FakeResolver(MailServerLookup result) : IMailServerResolver
+    {
+        public string? Domain { get; private set; }
+
+        public Task<MailServerLookup> LookupAsync(string asciiDomain, CancellationToken cancellationToken = default)
+        {
+            Domain = asciiDomain;
+            return Task.FromResult(result);
+        }
+    }
+
+    [Theory]
+    [InlineData(MailServerStatus.Found, EmailError.None)]
+    [InlineData(MailServerStatus.ImplicitMx, EmailError.None)]
+    [InlineData(MailServerStatus.NullMx, EmailError.NullMx)]
+    [InlineData(MailServerStatus.NoMailServer, EmailError.NoMailServer)]
+    [InlineData(MailServerStatus.DomainNotFound, EmailError.DomainNotFound)]
+    [InlineData(MailServerStatus.Failed, EmailError.DnsLookupFailed)]
+    public async Task MapsLookupStatus(MailServerStatus status, EmailError expected)
+    {
+        var records = status == MailServerStatus.Found ? new[] { new MxRecord(10, "mx.thư.vn") } : [];
+        var resolver = new FakeResolver(new MailServerLookup(status, records));
+
+        var result = await EmailValidator.ValidateWithMailServerAsync("An@Thư.vn", resolver);
+
+        Assert.Equal(expected, result.Error);
+        Assert.True(result.MailServerChecked);
+        Assert.Equal("xn--th-e0a.vn", resolver.Domain); // tra bằng dạng ASCII
+        Assert.Equal("An@thư.vn", result.NormalizedEmail);
+        Assert.Equal(records, result.MailServers);
+    }
+
+    [Fact]
+    public async Task InvalidSyntax_DoesNotQueryDns()
+    {
+        var resolver = new FakeResolver(new MailServerLookup(MailServerStatus.Found, []));
+        var result = await EmailValidator.ValidateWithMailServerAsync("an@b", resolver);
+        Assert.Equal(EmailError.DomainInvalid, result.Error);
+        Assert.False(result.MailServerChecked);
+        Assert.Null(resolver.Domain);
+    }
 }
 
 public class DnsMessageTests
@@ -340,6 +387,16 @@ public class DnsMxResolverTests
         Assert.Throws<ArgumentOutOfRangeException>(() => new DnsMxResolver(null, TimeSpan.Zero));
     }
 
+    [Fact]
+    public async Task ValidateWithMailServer_EndToEnd()
+    {
+        await using var dns = new FakeDns(q => [FakeDns.Response(q, 0, FakeDns.Mx(5, "mx.xn--th-e0a.vn"))]);
+        var result = await EmailValidator.ValidateWithMailServerAsync(
+            "an@thư.vn", new DnsMxResolver([dns.EndPoint], ShortTimeout));
+        Assert.True(result.IsValid);
+        Assert.Equal([new MxRecord(5, "mx.xn--th-e0a.vn")], result.MailServers);
+    }
+
     /// <summary>Tra DNS thật; chỉ chạy khi đặt biến môi trường THUVIEN_NETWORK_TESTS=1.</summary>
     [Fact]
     public async Task RealDns_WhenEnabled()
@@ -352,6 +409,7 @@ public class DnsMxResolverTests
         Assert.Equal(MailServerStatus.Found, (await DnsMxResolver.Default.LookupAsync("gmail.com")).Status);
         Assert.Equal(MailServerStatus.DomainNotFound,
             (await DnsMxResolver.Default.LookupAsync("khong-ton-tai-" + Guid.NewGuid().ToString("N") + ".com")).Status);
+        Assert.Equal(EmailError.None, (await EmailValidator.ValidateWithMailServerAsync("test@gmail.com")).Error);
     }
 }
 

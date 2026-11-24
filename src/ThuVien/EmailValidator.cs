@@ -37,6 +37,21 @@ public enum EmailError
 
     /// <summary>Tên miền sai cú pháp (nhãn rỗng, ký tự lạ, thiếu đuôi tên miền, ...).</summary>
     DomainInvalid,
+
+    /// <summary>Tên miền không tồn tại (DNS trả NXDOMAIN).</summary>
+    DomainNotFound,
+
+    /// <summary>Tên miền tồn tại nhưng không có bản ghi MX, A hay AAAA để nhận mail.</summary>
+    NoMailServer,
+
+    /// <summary>Tên miền khai báo không nhận mail (Null MX, RFC 7505).</summary>
+    NullMx,
+
+    /// <summary>
+    /// Không tra được DNS (hết thời gian chờ, máy chủ DNS lỗi, không có mạng).
+    /// Đây là lỗi tạm thời: địa chỉ có thể vẫn đúng, nên cân nhắc thử lại thay vì từ chối.
+    /// </summary>
+    DnsLookupFailed,
 }
 
 /// <summary>Kết quả kiểm tra một địa chỉ email.</summary>
@@ -69,11 +84,17 @@ public sealed record EmailValidationResult
     /// (vd. <c>an@gmial.com</c> → <c>an@gmail.com</c>). Chỉ là gợi ý, không ảnh hưởng <see cref="IsValid"/>.
     /// </summary>
     public string? Suggestion { get; init; }
+
+    /// <summary><c>true</c> nếu đã tra máy chủ mail qua DNS (dùng <see cref="EmailValidator.ValidateWithMailServerAsync"/>).</summary>
+    public bool MailServerChecked { get; init; }
+
+    /// <summary>Các máy chủ nhận mail tìm được, sắp theo độ ưu tiên. Rỗng nếu chưa tra hoặc không có.</summary>
+    public IReadOnlyList<MxRecord> MailServers { get; init; } = [];
 }
 
 /// <summary>
 /// Kiểm tra địa chỉ email: cú pháp theo RFC 5321/5322, tên miền quốc tế (IDN, vd. <c>thư.vn</c>),
-/// và gợi ý sửa lỗi gõ.
+/// gợi ý sửa lỗi gõ, và (tùy chọn) tra bản ghi MX để biết tên miền có nhận mail không.
 /// </summary>
 /// <remarks>
 /// Kiểm tra cú pháp chặt hơn <see cref="Validators.IsEmail"/>. Hỗ trợ phần tên dạng dot-atom
@@ -184,6 +205,52 @@ public static class EmailValidator
     public static bool IsValid(string? email) => Validate(email).IsValid;
 
     /// <summary>
+    /// Kiểm tra cú pháp, rồi tra DNS xem tên miền có nhận mail không: có bản ghi MX, hoặc
+    /// không có MX nhưng có A/AAAA (RFC 5321 §5.1). Tên miền khai báo Null MX (RFC 7505) bị coi là
+    /// không nhận mail.
+    /// </summary>
+    /// <param name="email">Địa chỉ cần kiểm tra.</param>
+    /// <param name="resolver">Bộ tra máy chủ mail; mặc định <see cref="DnsMxResolver.Default"/> (dùng máy chủ DNS của hệ thống).</param>
+    /// <param name="cancellationToken">Hủy thao tác.</param>
+    /// <remarks>
+    /// Có máy chủ mail không có nghĩa là hộp thư tồn tại; muốn chắc chắn vẫn cần gửi mail xác nhận.
+    /// Khi DNS lỗi tạm thời, kết quả là <see cref="EmailError.DnsLookupFailed"/>.
+    /// </remarks>
+    public static async Task<EmailValidationResult> ValidateWithMailServerAsync(
+        string? email,
+        IMailServerResolver? resolver = null,
+        CancellationToken cancellationToken = default)
+    {
+        var result = Validate(email);
+        if (!result.IsValid)
+        {
+            return result;
+        }
+
+        var ascii = result.AsciiEmail!;
+        var domain = ascii[(ascii.LastIndexOf('@') + 1)..];
+        var lookup = await (resolver ?? DnsMxResolver.Default)
+            .LookupAsync(domain, cancellationToken)
+            .ConfigureAwait(false);
+
+        var error = lookup.Status switch
+        {
+            MailServerStatus.Found or MailServerStatus.ImplicitMx => EmailError.None,
+            MailServerStatus.NullMx => EmailError.NullMx,
+            MailServerStatus.NoMailServer => EmailError.NoMailServer,
+            MailServerStatus.DomainNotFound => EmailError.DomainNotFound,
+            _ => EmailError.DnsLookupFailed,
+        };
+
+        return result with
+        {
+            Error = error,
+            MailServerChecked = true,
+            MailServers = lookup.Records,
+        };
+    }
+
+    /// <summary>
     /// Gợi ý sửa khi tên miền giống một nhà cung cấp mail phổ biến bị gõ sai
     /// (vd. <c>an@gmial.com</c> → <c>an@gmail.com</c>). Trả về <c>null</c> nếu không có gợi ý.
     /// </summary>
@@ -203,6 +270,10 @@ public static class EmailValidator
         EmailError.DomainEmpty => "Thiếu tên miền sau @.",
         EmailError.DomainTooLong => $"Tên miền dài quá {MaxDomainLength} ký tự.",
         EmailError.DomainInvalid => "Tên miền không hợp lệ.",
+        EmailError.DomainNotFound => "Tên miền không tồn tại.",
+        EmailError.NoMailServer => "Tên miền không có máy chủ nhận mail.",
+        EmailError.NullMx => "Tên miền khai báo không nhận mail.",
+        EmailError.DnsLookupFailed => "Không kiểm tra được máy chủ mail, vui lòng thử lại sau.",
         _ => error.ToString(),
     };
 
