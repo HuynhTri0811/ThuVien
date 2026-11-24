@@ -1,3 +1,8 @@
+using System.Buffers.Binary;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+
 namespace ThuVien.Tests;
 
 public class EmailValidatorSyntaxTests
@@ -138,4 +143,367 @@ public class EmailValidatorSyntaxTests
     [InlineData("kitten", "sitting", 3)]
     public void Distance_Works(string a, string b, int expected) =>
         Assert.Equal(expected, EmailValidator.Distance(a, b));
+}
+
+public class DnsMessageTests
+{
+    [Fact]
+    public void BuildQuery_EncodesQuestion()
+    {
+        var q = DnsMessage.BuildQuery(0xABCD, "mx.b.vn", 15);
+        byte[] expected =
+        [
+            0xAB, 0xCD, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0,
+            2, (byte)'m', (byte)'x', 1, (byte)'b', 2, (byte)'v', (byte)'n', 0,
+            0, 15, 0, 1,
+        ];
+        Assert.Equal(expected, q);
+    }
+
+    [Theory]
+    [InlineData("a..b")]
+    [InlineData("thư.vn")]
+    public void BuildQuery_RejectsBadLabels(string name) =>
+        Assert.Throws<ArgumentException>(() => DnsMessage.BuildQuery(1, name, 15));
+
+    [Fact]
+    public void BuildQuery_RejectsLongLabel() =>
+        Assert.Throws<ArgumentException>(() => DnsMessage.BuildQuery(1, new string('a', 64) + ".vn", 15));
+
+    [Fact]
+    public void Parse_ReadsCompressedMx()
+    {
+        var query = DnsMessage.BuildQuery(7, "b.vn", 15);
+        var response = FakeDns.Response(query, 0, FakeDns.Mx(20, "mx2.b.vn"), FakeDns.MxPointer(10, "mx1"));
+        var parsed = DnsMessage.Parse(response, "b.vn", 15);
+        Assert.Equal(0, parsed.ResponseCode);
+        Assert.Equal([new MxRecord(20, "mx2.b.vn"), new MxRecord(10, "mx1.b.vn")], parsed.MxRecords);
+    }
+
+    [Fact]
+    public void Parse_RejectsPointerLoop()
+    {
+        byte[] message = [0, 1, 0x81, 0x80, 0, 1, 0, 0, 0, 0, 0, 0, 0xC0, 12];
+        Assert.Throws<FormatException>(() => DnsMessage.Parse(message, "b.vn", 15));
+    }
+
+    [Fact]
+    public void Parse_RejectsTruncatedPackets()
+    {
+        var query = DnsMessage.BuildQuery(7, "b.vn", 15);
+        var response = FakeDns.Response(query, 0, FakeDns.Mx(10, "mx.b.vn"));
+        for (var length = 0; length < response.Length; length++)
+        {
+            var cut = response[..length];
+            Assert.Throws<FormatException>(() => DnsMessage.Parse(cut, "b.vn", 15));
+        }
+    }
+
+    [Fact]
+    public void Parse_RejectsMismatchedQuestion()
+    {
+        var query = DnsMessage.BuildQuery(7, "khac.vn", 15);
+        var response = FakeDns.Response(query, 0, FakeDns.Mx(10, "mx.b.vn"));
+        Assert.Throws<FormatException>(() => DnsMessage.Parse(response, "b.vn", 15));
+        Assert.Throws<FormatException>(() => DnsMessage.Parse(response, "khac.vn", 1));
+    }
+
+    [Fact]
+    public void Parse_RejectsQuery() =>
+        Assert.Throws<FormatException>(() => DnsMessage.Parse(DnsMessage.BuildQuery(7, "b.vn", 15), "b.vn", 15));
+}
+
+public class DnsMxResolverTests
+{
+    private static readonly TimeSpan ShortTimeout = TimeSpan.FromMilliseconds(300);
+
+    [Fact]
+    public async Task Found_SortedByPreference()
+    {
+        await using var dns = new FakeDns(q => [FakeDns.Response(q, 0, FakeDns.Mx(20, "mx2.b.vn"), FakeDns.Mx(10, "MX1.b.vn"))]);
+        var lookup = await new DnsMxResolver([dns.EndPoint], ShortTimeout).LookupAsync("b.vn");
+        Assert.Equal(MailServerStatus.Found, lookup.Status);
+        Assert.Equal([new MxRecord(10, "mx1.b.vn"), new MxRecord(20, "mx2.b.vn")], lookup.Records);
+    }
+
+    [Fact]
+    public async Task NullMx()
+    {
+        await using var dns = new FakeDns(q => [FakeDns.Response(q, 0, FakeDns.Mx(0, ""))]);
+        var lookup = await new DnsMxResolver([dns.EndPoint], ShortTimeout).LookupAsync("b.vn");
+        Assert.Equal(MailServerStatus.NullMx, lookup.Status);
+        Assert.Empty(lookup.Records);
+    }
+
+    [Fact]
+    public async Task DomainNotFound()
+    {
+        await using var dns = new FakeDns(q => [FakeDns.Response(q, 3)]);
+        var lookup = await new DnsMxResolver([dns.EndPoint], ShortTimeout).LookupAsync("khongco.vn");
+        Assert.Equal(MailServerStatus.DomainNotFound, lookup.Status);
+    }
+
+    [Theory]
+    [InlineData((ushort)1)]
+    [InlineData((ushort)28)]
+    public async Task NoMx_FallsBackToAddress(ushort addressType)
+    {
+        await using var dns = new FakeDns(q => FakeDns.QueryType(q) == addressType
+            ? [FakeDns.Response(q, 0, FakeDns.Address(addressType))]
+            : [FakeDns.Response(q, 0)]);
+        var lookup = await new DnsMxResolver([dns.EndPoint], ShortTimeout).LookupAsync("b.vn");
+        Assert.Equal(MailServerStatus.ImplicitMx, lookup.Status);
+        Assert.Equal([new MxRecord(0, "b.vn")], lookup.Records);
+    }
+
+    [Fact]
+    public async Task NoRecordsAtAll()
+    {
+        await using var dns = new FakeDns(q => [FakeDns.Response(q, 0)]);
+        var lookup = await new DnsMxResolver([dns.EndPoint], ShortTimeout).LookupAsync("b.vn");
+        Assert.Equal(MailServerStatus.NoMailServer, lookup.Status);
+        Assert.Equal(3, dns.QueryCount); // MX, A, AAAA
+    }
+
+    [Fact]
+    public async Task ServFail_TriesNextServer()
+    {
+        await using var failing = new FakeDns(q => [FakeDns.Response(q, 2)]);
+        await using var good = new FakeDns(q => [FakeDns.Response(q, 0, FakeDns.Mx(10, "mx.b.vn"))]);
+        var lookup = await new DnsMxResolver([failing.EndPoint, good.EndPoint], ShortTimeout).LookupAsync("b.vn");
+        Assert.Equal(MailServerStatus.Found, lookup.Status);
+        Assert.Equal(1, failing.QueryCount);
+    }
+
+    [Fact]
+    public async Task Timeout_TriesNextServer()
+    {
+        await using var silent = new FakeDns(_ => []);
+        await using var good = new FakeDns(q => [FakeDns.Response(q, 0, FakeDns.Mx(10, "mx.b.vn"))]);
+        var lookup = await new DnsMxResolver([silent.EndPoint, good.EndPoint], ShortTimeout).LookupAsync("b.vn");
+        Assert.Equal(MailServerStatus.Found, lookup.Status);
+    }
+
+    [Fact]
+    public async Task AllServersFail_ReturnsFailed()
+    {
+        await using var silent = new FakeDns(_ => []);
+        await using var garbage = new FakeDns(q => [[.. q[..2], 0xFF, 0xFF]]);
+        var lookup = await new DnsMxResolver([silent.EndPoint, garbage.EndPoint], ShortTimeout).LookupAsync("b.vn");
+        Assert.Equal(MailServerStatus.Failed, lookup.Status);
+    }
+
+    [Fact]
+    public async Task IgnoresResponseWithWrongId()
+    {
+        await using var dns = new FakeDns(q =>
+        {
+            var spoofed = FakeDns.Response(q, 0, FakeDns.Mx(10, "ke-gian.vn"));
+            spoofed[0] ^= 0xFF;
+            return [spoofed, FakeDns.Response(q, 0, FakeDns.Mx(10, "mx.b.vn"))];
+        });
+        var lookup = await new DnsMxResolver([dns.EndPoint], ShortTimeout).LookupAsync("b.vn");
+        Assert.Equal([new MxRecord(10, "mx.b.vn")], lookup.Records);
+    }
+
+    [Fact]
+    public async Task Truncated_RetriesOverTcp()
+    {
+        await using var dns = new FakeDns(
+            q => [FakeDns.Response(q, 0, truncated: true)],
+            tcp: q => FakeDns.Response(q, 0, FakeDns.Mx(10, "mx.b.vn")));
+        var lookup = await new DnsMxResolver([dns.EndPoint], ShortTimeout).LookupAsync("b.vn");
+        Assert.Equal(MailServerStatus.Found, lookup.Status);
+        Assert.Equal(1, dns.TcpQueryCount);
+    }
+
+    [Fact]
+    public async Task Cancellation_Propagates()
+    {
+        await using var silent = new FakeDns(_ => []);
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
+        var resolver = new DnsMxResolver([silent.EndPoint], TimeSpan.FromSeconds(10));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => resolver.LookupAsync("b.vn", cts.Token));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("khong hop le")]
+    [InlineData("b")]
+    public async Task InvalidDomain_Throws(string domain) =>
+        await Assert.ThrowsAnyAsync<ArgumentException>(() => DnsMxResolver.Default.LookupAsync(domain));
+
+    [Fact]
+    public void Constructor_Validates()
+    {
+        Assert.Throws<ArgumentException>(() => new DnsMxResolver([]));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new DnsMxResolver(null, TimeSpan.Zero));
+    }
+
+    /// <summary>Tra DNS thật; chỉ chạy khi đặt biến môi trường THUVIEN_NETWORK_TESTS=1.</summary>
+    [Fact]
+    public async Task RealDns_WhenEnabled()
+    {
+        if (Environment.GetEnvironmentVariable("THUVIEN_NETWORK_TESTS") != "1")
+        {
+            return;
+        }
+
+        Assert.Equal(MailServerStatus.Found, (await DnsMxResolver.Default.LookupAsync("gmail.com")).Status);
+        Assert.Equal(MailServerStatus.DomainNotFound,
+            (await DnsMxResolver.Default.LookupAsync("khong-ton-tai-" + Guid.NewGuid().ToString("N") + ".com")).Status);
+    }
+}
+
+/// <summary>Máy chủ DNS giả trên 127.0.0.1 (UDP, kèm TCP trên cùng cổng nếu cần).</summary>
+internal sealed class FakeDns : IAsyncDisposable
+{
+    private readonly UdpClient _udp;
+    private readonly TcpListener? _tcp;
+    private readonly CancellationTokenSource _stop = new();
+    private readonly Task _udpLoop;
+    private readonly Task _tcpLoop = Task.CompletedTask;
+    private int _queryCount;
+    private int _tcpQueryCount;
+
+    public FakeDns(Func<byte[], byte[][]> udp, Func<byte[], byte[]>? tcp = null)
+    {
+        _udp = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+        EndPoint = (IPEndPoint)_udp.Client.LocalEndPoint!;
+        _udpLoop = Task.Run(async () =>
+        {
+            while (!_stop.IsCancellationRequested)
+            {
+                UdpReceiveResult packet;
+                try
+                {
+                    packet = await _udp.ReceiveAsync(_stop.Token);
+                }
+                catch (Exception)
+                {
+                    return;
+                }
+
+                Interlocked.Increment(ref _queryCount);
+                foreach (var response in udp(packet.Buffer))
+                {
+                    await _udp.SendAsync(response, packet.RemoteEndPoint);
+                }
+            }
+        });
+
+        if (tcp is not null)
+        {
+            _tcp = new TcpListener(IPAddress.Loopback, EndPoint.Port);
+            _tcp.Start();
+            _tcpLoop = Task.Run(async () =>
+            {
+                try
+                {
+                    using var client = await _tcp.AcceptTcpClientAsync(_stop.Token);
+                    var stream = client.GetStream();
+                    var len = new byte[2];
+                    await stream.ReadExactlyAsync(len, _stop.Token);
+                    var query = new byte[BinaryPrimitives.ReadUInt16BigEndian(len)];
+                    await stream.ReadExactlyAsync(query, _stop.Token);
+                    Interlocked.Increment(ref _tcpQueryCount);
+                    var response = tcp(query);
+                    var framed = new byte[response.Length + 2];
+                    BinaryPrimitives.WriteUInt16BigEndian(framed, (ushort)response.Length);
+                    response.CopyTo(framed, 2);
+                    await stream.WriteAsync(framed, _stop.Token);
+                }
+                catch (Exception)
+                {
+                    // dừng
+                }
+            });
+        }
+    }
+
+    public IPEndPoint EndPoint { get; }
+
+    public int QueryCount => Volatile.Read(ref _queryCount);
+
+    public int TcpQueryCount => Volatile.Read(ref _tcpQueryCount);
+
+    public async ValueTask DisposeAsync()
+    {
+        _stop.Cancel();
+        _udp.Dispose();
+        _tcp?.Stop();
+        await Task.WhenAll(_udpLoop, _tcpLoop);
+        _stop.Dispose();
+    }
+
+    public static ushort QueryType(byte[] query) =>
+        BinaryPrimitives.ReadUInt16BigEndian(query.AsSpan(query.Length - 4));
+
+    /// <summary>Phản hồi: chép header + câu hỏi của truy vấn, thêm các bản ghi trả lời (tên chủ trỏ về câu hỏi).</summary>
+    public static byte[] Response(byte[] query, int rcode, params (ushort Type, byte[] Data)[] answers) =>
+        Response(query, rcode, truncated: false, answers);
+
+    public static byte[] Response(byte[] query, int rcode, bool truncated, params (ushort Type, byte[] Data)[] answers)
+    {
+        var ms = new MemoryStream();
+        ms.Write(query, 0, 2);
+        WriteU16(ms, (ushort)(0x8180 | rcode | (truncated ? 0x0200 : 0)));
+        WriteU16(ms, 1);
+        WriteU16(ms, (ushort)answers.Length);
+        WriteU16(ms, 0);
+        WriteU16(ms, 0);
+        ms.Write(query, 12, query.Length - 12);
+        foreach (var (type, data) in answers)
+        {
+            ms.Write([0xC0, 12]);
+            WriteU16(ms, type);
+            WriteU16(ms, 1);
+            ms.Write([0, 0, 1, 44]);
+            WriteU16(ms, (ushort)data.Length);
+            ms.Write(data);
+        }
+
+        return ms.ToArray();
+    }
+
+    public static (ushort, byte[]) Mx(ushort preference, string host)
+    {
+        var ms = new MemoryStream();
+        WriteU16(ms, preference);
+        WriteName(ms, host);
+        ms.WriteByte(0);
+        return (15, ms.ToArray());
+    }
+
+    /// <summary>MX có tên dạng "<paramref name="label"/>" + con trỏ về tên trong câu hỏi.</summary>
+    public static (ushort, byte[]) MxPointer(ushort preference, string label)
+    {
+        var ms = new MemoryStream();
+        WriteU16(ms, preference);
+        WriteName(ms, label);
+        ms.Write([0xC0, 12]);
+        return (15, ms.ToArray());
+    }
+
+    public static (ushort, byte[]) Address(ushort type) => (type, new byte[type == 1 ? 4 : 16]);
+
+    private static void WriteName(MemoryStream ms, string name)
+    {
+        if (name.Length == 0)
+        {
+            return;
+        }
+
+        foreach (var label in name.Split('.'))
+        {
+            ms.WriteByte((byte)label.Length);
+            ms.Write(Encoding.ASCII.GetBytes(label));
+        }
+    }
+
+    private static void WriteU16(MemoryStream ms, ushort value)
+    {
+        ms.WriteByte((byte)(value >> 8));
+        ms.WriteByte((byte)value);
+    }
 }
