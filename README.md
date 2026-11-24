@@ -102,6 +102,7 @@ Quy tắc chính:
   - DNS không trả lời hoặc lỗi → `DnsLookupFailed`. Đây là lỗi tạm thời, nên cho thử lại thay vì từ chối người dùng.
 - Có máy chủ mail không có nghĩa là hộp thư tồn tại; muốn chắc chắn vẫn cần gửi mail xác nhận.
 - Dùng máy chủ DNS riêng hoặc đổi thời gian chờ: `new DnsMxResolver([new IPEndPoint(IPAddress.Parse("1.1.1.1"), 53)], TimeSpan.FromSeconds(2))`. Cài `IMailServerResolver` để tự tra theo cách khác (vd. trong test).
+- Thời gian chờ tính chung cho mọi truy vấn (MX, A, AAAA) gửi tới một máy chủ DNS. Các máy chủ được thử lần lượt, nên một lần tra mất tối đa khoảng số máy chủ × thời gian chờ.
 
 ## Sử dụng
 
