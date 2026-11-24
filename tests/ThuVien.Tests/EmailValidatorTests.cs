@@ -256,6 +256,51 @@ public class DnsMessageTests
     }
 
     [Fact]
+    public void Parse_IgnoresRecordsOfOtherNames()
+    {
+        var query = DnsMessage.BuildQuery(7, "b.vn", 15);
+        var response = FakeDns.ResponseWithOwners(query,
+            ("khac.vn", 15, FakeDns.Mx(10, "mx.khac.vn").Item2),
+            ("b.vn", 15, FakeDns.Mx(20, "mx.b.vn").Item2),
+            ("khac.vn", 1, new byte[4]));
+        var parsed = DnsMessage.Parse(response, "b.vn", 15);
+        Assert.Equal([new MxRecord(20, "mx.b.vn")], parsed.MxRecords);
+        Assert.Equal(0, parsed.AddressCount);
+    }
+
+    [Fact]
+    public void Parse_FollowsCname()
+    {
+        var query = DnsMessage.BuildQuery(7, "b.vn", 1);
+        var cname = new MemoryStream();
+        foreach (var label in "that.b.vn".Split('.'))
+        {
+            cname.WriteByte((byte)label.Length);
+            cname.Write(Encoding.ASCII.GetBytes(label));
+        }
+
+        cname.WriteByte(0);
+        var response = FakeDns.ResponseWithOwners(query,
+            ("b.vn", 5, cname.ToArray()),
+            ("that.b.vn", 1, new byte[4]));
+        Assert.Equal(1, DnsMessage.Parse(response, "b.vn", 1).AddressCount);
+    }
+
+    [Theory]
+    [InlineData(new byte[] { 3, (byte)'m', 0xC3, (byte)'x', 2, (byte)'v', (byte)'n', 0 })] // byte ngoài ASCII
+    [InlineData(new byte[] { 3, (byte)'a', (byte)'.', (byte)'b', 2, (byte)'v', (byte)'n', 0 })] // dấu chấm trong nhãn
+    [InlineData(new byte[] { 3, (byte)'a', (byte)' ', (byte)'b', 2, (byte)'v', (byte)'n', 0 })]
+    [InlineData(new byte[] { 3, (byte)'-', (byte)'a', (byte)'b', 2, (byte)'v', (byte)'n', 0 })]
+    public void Parse_DropsMxWithInvalidHost(byte[] host)
+    {
+        var query = DnsMessage.BuildQuery(7, "b.vn", 15);
+        var response = FakeDns.ResponseWithOwners(query,
+            ("b.vn", 15, [0, 10, .. host]),
+            ("b.vn", 15, FakeDns.Mx(20, "mx.b.vn").Item2));
+        Assert.Equal([new MxRecord(20, "mx.b.vn")], DnsMessage.Parse(response, "b.vn", 15).MxRecords);
+    }
+
+    [Fact]
     public void Parse_RejectsPointerLoop()
     {
         byte[] message = [0, 1, 0x81, 0x80, 0, 1, 0, 0, 0, 0, 0, 0, 0xC0, 12];
@@ -341,6 +386,67 @@ public class DnsMxResolverTests
     }
 
     [Fact]
+    public async Task AddressQueryError_KeepsDefiniteNoMxAnswer()
+    {
+        // MX: không có; A: không có; AAAA: SERVFAIL → vẫn là NoMailServer, không phải Failed.
+        await using var dns = new FakeDns(q => FakeDns.QueryType(q) == 28
+            ? [FakeDns.Response(q, 2)]
+            : [FakeDns.Response(q, 0)]);
+        var lookup = await new DnsMxResolver([dns.EndPoint], ShortTimeout).LookupAsync("b.vn");
+        Assert.Equal(MailServerStatus.NoMailServer, lookup.Status);
+    }
+
+    [Fact]
+    public async Task AddressQueryError_StillFindsOtherAddressType()
+    {
+        await using var dns = new FakeDns(q => FakeDns.QueryType(q) switch
+        {
+            1 => [FakeDns.Response(q, 2)],
+            28 => [FakeDns.Response(q, 0, FakeDns.Address(28))],
+            _ => [FakeDns.Response(q, 0)],
+        });
+        var lookup = await new DnsMxResolver([dns.EndPoint], ShortTimeout).LookupAsync("b.vn");
+        Assert.Equal(MailServerStatus.ImplicitMx, lookup.Status);
+    }
+
+    [Fact]
+    public async Task AllAddressQueriesFail_ReturnsFailed()
+    {
+        await using var dns = new FakeDns(q => FakeDns.QueryType(q) == 15
+            ? [FakeDns.Response(q, 0)]
+            : [FakeDns.Response(q, 2)]);
+        var lookup = await new DnsMxResolver([dns.EndPoint], ShortTimeout).LookupAsync("b.vn");
+        Assert.Equal(MailServerStatus.Failed, lookup.Status);
+    }
+
+    [Fact]
+    public async Task Timeout_CoversAllQueriesToOneServer()
+    {
+        // Mỗi phản hồi chậm 200 ms (< Timeout 500 ms) nhưng ba truy vấn MX, A, AAAA cộng lại vượt Timeout.
+        await using var dns = new FakeDns(q =>
+        {
+            Thread.Sleep(200);
+            return [FakeDns.Response(q, 0)];
+        });
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        var lookup = await new DnsMxResolver([dns.EndPoint], TimeSpan.FromMilliseconds(500)).LookupAsync("b.vn");
+        Assert.Equal(MailServerStatus.Failed, lookup.Status);
+        Assert.True(watch.Elapsed < TimeSpan.FromMilliseconds(580), $"Mất {watch.Elapsed}");
+    }
+
+    [Fact]
+    public async Task IgnoresMalformedResponseWithMatchingId()
+    {
+        await using var dns = new FakeDns(q =>
+        {
+            var malformed = FakeDns.Response(q, 0, FakeDns.Mx(10, "ke-gian.vn"));
+            return [malformed[..^3], FakeDns.Response(q, 0, FakeDns.Mx(10, "mx.b.vn"))];
+        });
+        var lookup = await new DnsMxResolver([dns.EndPoint], ShortTimeout).LookupAsync("b.vn");
+        Assert.Equal([new MxRecord(10, "mx.b.vn")], lookup.Records);
+    }
+
+    [Fact]
     public async Task ServFail_TriesNextServer()
     {
         await using var failing = new FakeDns(q => [FakeDns.Response(q, 2)]);
@@ -412,6 +518,7 @@ public class DnsMxResolverTests
     public void Constructor_Validates()
     {
         Assert.Throws<ArgumentException>(() => new DnsMxResolver([]));
+        Assert.Throws<ArgumentException>(() => new DnsMxResolver([null!]));
         Assert.Throws<ArgumentOutOfRangeException>(() => new DnsMxResolver(null, TimeSpan.Zero));
     }
 
@@ -425,15 +532,10 @@ public class DnsMxResolverTests
         Assert.Equal([new MxRecord(5, "mx.xn--th-e0a.vn")], result.MailServers);
     }
 
-    /// <summary>Tra DNS thật; chỉ chạy khi đặt biến môi trường THUVIEN_NETWORK_TESTS=1.</summary>
-    [Fact]
+    /// <summary>Tra DNS thật; chỉ chạy khi đặt biến môi trường THUVIEN_NETWORK_TESTS=1, nếu không thì báo bỏ qua.</summary>
+    [NetworkFact]
     public async Task RealDns_WhenEnabled()
     {
-        if (Environment.GetEnvironmentVariable("THUVIEN_NETWORK_TESTS") != "1")
-        {
-            return;
-        }
-
         Assert.Equal(MailServerStatus.Found, (await DnsMxResolver.Default.LookupAsync("gmail.com")).Status);
         Assert.Equal(MailServerStatus.DomainNotFound,
             (await DnsMxResolver.Default.LookupAsync("khong-ton-tai-" + Guid.NewGuid().ToString("N") + ".com")).Status);
@@ -444,7 +546,7 @@ public class DnsMxResolverTests
 /// <summary>Máy chủ DNS giả trên 127.0.0.1 (UDP, kèm TCP trên cùng cổng nếu cần).</summary>
 internal sealed class FakeDns : IAsyncDisposable
 {
-    private readonly UdpClient _udp;
+    private readonly UdpClient _udp = null!;
     private readonly TcpListener? _tcp;
     private readonly CancellationTokenSource _stop = new();
     private readonly Task _udpLoop;
@@ -454,8 +556,29 @@ internal sealed class FakeDns : IAsyncDisposable
 
     public FakeDns(Func<byte[], byte[][]> udp, Func<byte[], byte[]>? tcp = null)
     {
-        _udp = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
-        EndPoint = (IPEndPoint)_udp.Client.LocalEndPoint!;
+        // Cổng UDP ngẫu nhiên có thể đang bị chương trình khác dùng cho TCP: thử lại với cổng khác.
+        for (var attempt = 0; ; attempt++)
+        {
+            _udp = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
+            EndPoint = (IPEndPoint)_udp.Client.LocalEndPoint!;
+            if (tcp is null)
+            {
+                break;
+            }
+
+            try
+            {
+                _tcp = new TcpListener(IPAddress.Loopback, EndPoint.Port);
+                _tcp.Start();
+                break;
+            }
+            catch (SocketException) when (attempt < 20)
+            {
+                _tcp = null;
+                _udp.Dispose();
+            }
+        }
+
         _udpLoop = Task.Run(async () =>
         {
             while (!_stop.IsCancellationRequested)
@@ -471,17 +594,22 @@ internal sealed class FakeDns : IAsyncDisposable
                 }
 
                 Interlocked.Increment(ref _queryCount);
-                foreach (var response in udp(packet.Buffer))
+                try
                 {
-                    await _udp.SendAsync(response, packet.RemoteEndPoint);
+                    foreach (var response in udp(packet.Buffer))
+                    {
+                        await _udp.SendAsync(response, packet.RemoteEndPoint);
+                    }
+                }
+                catch (Exception)
+                {
+                    return; // đã dừng trong lúc đang trả lời
                 }
             }
         });
 
-        if (tcp is not null)
+        if (_tcp is not null && tcp is not null)
         {
-            _tcp = new TcpListener(IPAddress.Loopback, EndPoint.Port);
-            _tcp.Start();
             _tcpLoop = Task.Run(async () =>
             {
                 try
@@ -561,6 +689,29 @@ internal sealed class FakeDns : IAsyncDisposable
         return (15, ms.ToArray());
     }
 
+    /// <summary>Phản hồi với tên chủ ghi đầy đủ cho từng bản ghi.</summary>
+    public static byte[] ResponseWithOwners(byte[] query, params (string Owner, ushort Type, byte[] Data)[] answers)
+    {
+        var ms = new MemoryStream();
+        ms.Write(Response(query, 0)[..6]);
+        WriteU16(ms, (ushort)answers.Length);
+        WriteU16(ms, 0);
+        WriteU16(ms, 0);
+        ms.Write(query, 12, query.Length - 12);
+        foreach (var (owner, type, data) in answers)
+        {
+            WriteName(ms, owner);
+            ms.WriteByte(0);
+            WriteU16(ms, type);
+            WriteU16(ms, 1);
+            ms.Write([0, 0, 1, 44]);
+            WriteU16(ms, (ushort)data.Length);
+            ms.Write(data);
+        }
+
+        return ms.ToArray();
+    }
+
     /// <summary>MX có tên dạng "<paramref name="label"/>" + con trỏ về tên trong câu hỏi.</summary>
     public static (ushort, byte[]) MxPointer(ushort preference, string label)
     {
@@ -591,5 +742,17 @@ internal sealed class FakeDns : IAsyncDisposable
     {
         ms.WriteByte((byte)(value >> 8));
         ms.WriteByte((byte)value);
+    }
+}
+
+/// <summary>Test cần mạng: bị bỏ qua (và báo là bỏ qua) trừ khi đặt THUVIEN_NETWORK_TESTS=1.</summary>
+public sealed class NetworkFactAttribute : FactAttribute
+{
+    public NetworkFactAttribute()
+    {
+        if (Environment.GetEnvironmentVariable("THUVIEN_NETWORK_TESTS") != "1")
+        {
+            Skip = "Cần mạng: đặt THUVIEN_NETWORK_TESTS=1 để chạy.";
+        }
     }
 }

@@ -52,7 +52,9 @@ public interface IMailServerResolver
 /// </summary>
 /// <remarks>
 /// Mỗi máy chủ DNS được thử một lần, lần lượt theo thứ tự; máy chủ không trả lời, trả SERVFAIL/REFUSED
-/// hay trả gói tin sai thì chuyển sang máy chủ kế tiếp. Lớp này an toàn khi dùng từ nhiều luồng.
+/// hay trả gói tin sai thì chuyển sang máy chủ kế tiếp. <see cref="Timeout"/> là thời gian chờ tổng cho
+/// một máy chủ (gồm cả truy vấn MX và A/AAAA), nên một lần tra mất tối đa khoảng số máy chủ × <see cref="Timeout"/>.
+/// Lớp này an toàn khi dùng từ nhiều luồng.
 /// </remarks>
 public sealed class DnsMxResolver : IMailServerResolver
 {
@@ -61,6 +63,10 @@ public sealed class DnsMxResolver : IMailServerResolver
     private const ushort TypeAaaa = 28;
 
     private static readonly ushort[] AddressTypes = [TypeA, TypeAaaa];
+
+    // Danh sách máy chủ DNS của hệ thống được lưu tạm để không liệt kê card mạng ở mỗi lần tra.
+    private static readonly long SystemServersCacheMs = 30_000;
+    private static (IPEndPoint[] Servers, long ExpiresAt)? s_systemServers;
 
     private readonly IPEndPoint[]? _servers;
 
@@ -75,13 +81,20 @@ public sealed class DnsMxResolver : IMailServerResolver
 
     /// <summary>Dùng các máy chủ DNS chỉ định (vd. <c>new IPEndPoint(IPAddress.Parse("1.1.1.1"), 53)</c>).</summary>
     /// <param name="servers">Máy chủ DNS; <c>null</c> để dùng của hệ thống.</param>
-    /// <param name="timeout">Thời gian chờ mỗi máy chủ; mặc định 3 giây.</param>
+    /// <param name="timeout">Thời gian chờ tổng cho mỗi máy chủ; mặc định 3 giây.</param>
+    /// <exception cref="ArgumentException">Danh sách máy chủ rỗng hoặc có phần tử <c>null</c>.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="timeout"/> không lớn hơn 0.</exception>
     public DnsMxResolver(IEnumerable<IPEndPoint>? servers, TimeSpan? timeout = null)
     {
         _servers = servers?.ToArray();
         if (_servers is { Length: 0 })
         {
             throw new ArgumentException("Cần ít nhất một máy chủ DNS.", nameof(servers));
+        }
+
+        if (_servers is not null && Array.IndexOf(_servers, null) >= 0)
+        {
+            throw new ArgumentException("Danh sách máy chủ DNS có phần tử null.", nameof(servers));
         }
 
         Timeout = timeout ?? TimeSpan.FromSeconds(3);
@@ -91,7 +104,7 @@ public sealed class DnsMxResolver : IMailServerResolver
         }
     }
 
-    /// <summary>Thời gian chờ mỗi máy chủ DNS.</summary>
+    /// <summary>Thời gian chờ tổng cho mỗi máy chủ DNS (gồm mọi truy vấn gửi tới máy chủ đó).</summary>
     public TimeSpan Timeout { get; }
 
     /// <inheritdoc />
@@ -120,6 +133,21 @@ public sealed class DnsMxResolver : IMailServerResolver
 
     private async Task<MailServerLookup> LookupWithServerAsync(IPEndPoint server, string domain, CancellationToken ct)
     {
+        // Một hạn chờ chung cho mọi truy vấn tới máy chủ này.
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(Timeout);
+        try
+        {
+            return await LookupWithServerCoreAsync(server, domain, deadline.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            throw new TimeoutException($"Máy chủ DNS {server} không trả lời trong {Timeout}.");
+        }
+    }
+
+    private static async Task<MailServerLookup> LookupWithServerCoreAsync(IPEndPoint server, string domain, CancellationToken ct)
+    {
         var mx = await QueryAsync(server, domain, TypeMx, ct).ConfigureAwait(false);
         if (mx.ResponseCode == DnsMessage.NameError)
         {
@@ -142,42 +170,53 @@ public sealed class DnsMxResolver : IMailServerResolver
         }
 
         // Không có MX: tên miền có địa chỉ A/AAAA thì chính nó nhận mail.
+        // Câu trả lời "không có MX" đã chắc chắn; một truy vấn địa chỉ lỗi không được làm mất nó,
+        // chỉ khi mọi truy vấn địa chỉ đều lỗi mới coi là không tra được.
+        Exception? addressError = null;
+        var answered = false;
         foreach (var type in AddressTypes)
         {
-            var address = await QueryAsync(server, domain, type, ct).ConfigureAwait(false);
+            DnsResponse address;
+            try
+            {
+                address = await QueryAsync(server, domain, type, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is DnsServerException or SocketException or IOException or FormatException)
+            {
+                addressError = ex;
+                continue;
+            }
+
+            answered = true;
             if (address.AddressCount > 0)
             {
                 return new MailServerLookup(MailServerStatus.ImplicitMx, [new MxRecord(0, domain)]);
             }
         }
 
+        if (!answered)
+        {
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(addressError!);
+        }
+
         return new MailServerLookup(MailServerStatus.NoMailServer, []);
     }
 
     /// <summary>Gửi một truy vấn; ném <see cref="DnsServerException"/> nếu máy chủ trả mã lỗi khác NXDOMAIN.</summary>
-    private async Task<DnsResponse> QueryAsync(IPEndPoint server, string domain, ushort type, CancellationToken ct)
+    private static async Task<DnsResponse> QueryAsync(IPEndPoint server, string domain, ushort type, CancellationToken ct)
     {
         var id = (ushort)RandomNumberGenerator.GetInt32(0, 0x10000);
         var query = DnsMessage.BuildQuery(id, domain, type);
 
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeout.CancelAfter(Timeout);
-        try
+        var response = await QueryUdpAsync(server, query, id, domain, type, ct).ConfigureAwait(false);
+        if (response.Truncated)
         {
-            var response = await QueryUdpAsync(server, query, id, domain, type, timeout.Token).ConfigureAwait(false);
-            if (response.Truncated)
-            {
-                response = await QueryTcpAsync(server, query, id, domain, type, timeout.Token).ConfigureAwait(false);
-            }
+            response = await QueryTcpAsync(server, query, id, domain, type, ct).ConfigureAwait(false);
+        }
 
-            return response.ResponseCode is DnsMessage.NoError or DnsMessage.NameError
-                ? response
-                : throw new DnsServerException(response.ResponseCode);
-        }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-        {
-            throw new TimeoutException($"Máy chủ DNS {server} không trả lời trong {Timeout}.");
-        }
+        return response.ResponseCode is DnsMessage.NoError or DnsMessage.NameError
+            ? response
+            : throw new DnsServerException(response.ResponseCode);
     }
 
     private static async Task<DnsResponse> QueryUdpAsync(
@@ -190,10 +229,18 @@ public sealed class DnsMxResolver : IMailServerResolver
         {
             var packet = await udp.ReceiveAsync(ct).ConfigureAwait(false);
 
-            // Bỏ qua gói không khớp mã truy vấn (gói trễ hoặc giả mạo), tiếp tục chờ gói đúng.
+            // Bỏ qua gói không khớp mã truy vấn hoặc hỏng (gói trễ hoặc giả mạo), tiếp tục chờ gói đúng
+            // tới khi hết hạn chờ.
             if (DnsMessage.TryReadId(packet.Buffer, out var responseId) && responseId == id)
             {
-                return DnsMessage.Parse(packet.Buffer, domain, type);
+                try
+                {
+                    return DnsMessage.Parse(packet.Buffer, domain, type);
+                }
+                catch (FormatException)
+                {
+                    // chờ gói kế tiếp
+                }
             }
         }
     }
@@ -225,6 +272,19 @@ public sealed class DnsMxResolver : IMailServerResolver
     }
 
     private static IPEndPoint[] GetSystemDnsServers()
+    {
+        var now = Environment.TickCount64;
+        if (s_systemServers is { } cached && now < cached.ExpiresAt)
+        {
+            return cached.Servers;
+        }
+
+        var servers = ReadSystemDnsServers();
+        s_systemServers = (servers, now + SystemServersCacheMs);
+        return servers;
+    }
+
+    private static IPEndPoint[] ReadSystemDnsServers()
     {
         try
         {
@@ -258,6 +318,10 @@ internal static class DnsMessage
 
     private const int HeaderLength = 12;
     private const ushort ClassIn = 1;
+    private const ushort TypeA = 1;
+    private const ushort TypeCname = 5;
+    private const ushort TypeMx = 15;
+    private const ushort TypeAaaa = 28;
 
     /// <summary>Tạo truy vấn chuẩn, yêu cầu đệ quy (RD).</summary>
     internal static byte[] BuildQuery(ushort id, string name, ushort type)
@@ -334,11 +398,13 @@ internal static class DnsMessage
         }
 
         pos += 4;
-        var mx = new List<MxRecord>();
-        var addressCount = 0;
+
+        // Đọc hết các bản ghi trước, rồi chỉ lấy bản ghi của tên đã hỏi hoặc của tên bí danh (CNAME) dẫn từ nó;
+        // bản ghi của tên khác trong phần trả lời bị bỏ qua.
+        var records = new List<(string Owner, ushort Type, int Start, int Length)>(answers);
         for (var i = 0; i < answers; i++)
         {
-            ReadName(message, ref pos); // tên chủ của bản ghi
+            var owner = ReadName(message, ref pos);
             if (pos + 10 > message.Length)
             {
                 throw new FormatException("Bản ghi DNS bị cắt.");
@@ -348,33 +414,77 @@ internal static class DnsMessage
             var recordClass = BinaryPrimitives.ReadUInt16BigEndian(message[(pos + 2)..]);
             var length = BinaryPrimitives.ReadUInt16BigEndian(message[(pos + 8)..]);
             pos += 10;
-            var end = pos + length;
-            if (end > message.Length)
+            if (pos + length > message.Length)
             {
                 throw new FormatException("Dữ liệu bản ghi DNS bị cắt.");
             }
 
             if (recordClass == ClassIn)
             {
-                switch (recordType)
-                {
-                    case 15 when length >= 3:
-                        var preference = BinaryPrimitives.ReadUInt16BigEndian(message[pos..]);
-                        var hostPos = pos + 2;
-                        var host = ReadName(message[..end], ref hostPos);
-                        mx.Add(new MxRecord(preference, host));
-                        break;
-                    case 1 when length == 4:
-                    case 28 when length == 16:
-                        addressCount++;
-                        break;
-                }
+                records.Add((owner, recordType, pos, length));
             }
 
-            pos = end;
+            pos += length;
+        }
+
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { name };
+        for (var changed = true; changed && names.Count <= 16;)
+        {
+            changed = false;
+            foreach (var r in records)
+            {
+                if (r.Type == TypeCname && names.Contains(r.Owner))
+                {
+                    var targetPos = r.Start;
+                    changed |= names.Add(ReadName(message[..(r.Start + r.Length)], ref targetPos));
+                }
+            }
+        }
+
+        var mx = new List<MxRecord>();
+        var addressCount = 0;
+        foreach (var r in records)
+        {
+            if (!names.Contains(r.Owner))
+            {
+                continue;
+            }
+
+            switch (r.Type)
+            {
+                case TypeMx when r.Length >= 3:
+                    var preference = BinaryPrimitives.ReadUInt16BigEndian(message[r.Start..]);
+                    var hostPos = r.Start + 2;
+                    var host = ReadName(message[..(r.Start + r.Length)], ref hostPos);
+
+                    // Bỏ tên máy chủ không phải tên miền hợp lệ (ký tự lạ, byte ngoài ASCII, ...).
+                    if (host.Length == 0 || IsHostName(host))
+                    {
+                        mx.Add(new MxRecord(preference, host));
+                    }
+
+                    break;
+                case TypeA when r.Length == 4:
+                case TypeAaaa when r.Length == 16:
+                    addressCount++;
+                    break;
+            }
         }
 
         return new DnsResponse(rcode, false, mx, addressCount);
+    }
+
+    private static bool IsHostName(string host)
+    {
+        foreach (var label in host.Split('.'))
+        {
+            if (!EmailValidator.IsLdhLabel(label))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>Đọc tên miền, hỗ trợ con trỏ nén (RFC 1035 §4.1.4); trả về dạng viết thường không có dấu chấm cuối.</summary>
@@ -437,7 +547,9 @@ internal static class DnsMessage
 
             foreach (var b in message.Slice(pos, length))
             {
-                sb.Append(char.ToLowerInvariant((char)b));
+                // Byte ngoài ASCII in được, hoặc dấu chấm nằm trong nhãn, được thay bằng U+FFFD để tên
+                // không bị hiểu nhầm (vd. nhãn "a.b" thành hai nhãn) và không qua được kiểm tra tên miền.
+                sb.Append(b is > 0x20 and < 0x7F and not (byte)'.' ? char.ToLowerInvariant((char)b) : '\uFFFD');
             }
 
             pos += length;
