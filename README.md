@@ -24,6 +24,65 @@ Bộ tiện ích tiếng Việt cho .NET 10.
 | | `PostgresToSqlServer` | `"2024-01-02 03:04:05+07"` → `"2024-01-01T20:04:05"` |
 | | `SqlServerToPostgres` | `"2024-01-02 03:04:05.1234567"` → `"2024-01-02 03:04:05.123457"` |
 
+## Bỏ dấu và tạo slug
+
+```csharp
+VietnameseText.RemoveDiacritics("Đường Nguyễn Huệ");           // "Duong Nguyen Hue"
+VietnameseText.ToSlug("  Đà Lạt -- mộng mơ!!  ", '_');          // "da_lat_mong_mo"
+VietnameseText.ToSlug("Cà phê ☕ sữa đá");                      // "ca-phe-sua-da"
+```
+
+Quy tắc chính:
+- `RemoveDiacritics` bỏ mọi dấu thanh và dấu mũ, đổi `đ`/`Đ` thành `d`/`D`, giữ nguyên chữ hoa thường và các ký tự khác. `null` hoặc chuỗi rỗng trả về `""`.
+- `ToSlug` bỏ dấu, viết thường, chỉ giữ chữ cái và chữ số ASCII. Mỗi đoạn ký tự khác (khoảng trắng, dấu câu, emoji, ...) gộp thành một dấu phân cách. Không có dấu phân cách ở đầu hay cuối.
+- Dấu phân cách mặc định là `-`, đổi bằng tham số thứ hai.
+
+## Đọc số thành chữ
+
+```csharp
+NumberToWords.ToVietnamese(21);         // "hai mươi mốt"
+NumberToWords.ToVietnamese(105);        // "một trăm linh năm"
+NumberToWords.ToVietnamese(1_000_005);  // "một triệu không trăm linh năm"
+NumberToWords.ToVietnamese(-5);         // "âm năm"
+NumberToWords.ToVietnameseCurrency(0);  // "Không đồng"
+```
+
+Quy tắc chính:
+- Nhận mọi giá trị `long`, kể cả `long.MinValue`. Số âm có tiền tố `âm`.
+- Đọc theo cách phổ biến ở miền Bắc: `linh` (không dùng `lẻ`), `nghìn` (không dùng `ngàn`), `tỷ`, `bốn` sau `mươi` (không dùng `tư`).
+- `mốt` cho hàng đơn vị 1 khi hàng chục từ 2 trở lên (`21` → `hai mươi mốt`, `11` → `mười một`). `lăm` cho hàng đơn vị 5 khi có hàng chục (`15` → `mười lăm`).
+- Nhóm ba chữ số không đứng đầu được đọc đủ `không trăm`, `linh`. Nhóm toàn số 0 thì bỏ qua.
+- Sau `nghìn tỷ` là `triệu tỷ`, `tỷ tỷ`.
+- `ToVietnameseCurrency` viết hoa chữ cái đầu và thêm `đồng` vào cuối.
+
+## Số điện thoại
+
+```csharp
+Validators.IsVietnamesePhone("0912.345.678");          // true
+Validators.NormalizeVietnamesePhone("84912345678");     // "0912345678"
+Validators.NormalizeVietnamesePhone("+84-912-345-678"); // "0912345678"
+Validators.NormalizeVietnamesePhone("02838123456");     // null (số cố định)
+```
+
+Quy tắc chính:
+- Chỉ nhận số di động 10 chữ số, đầu số `03`, `05`, `07`, `08`, `09`. Số cố định và số 11 chữ số kiểu cũ (`01xx`) không hợp lệ.
+- Chấp nhận tiền tố `0`, `+84` hoặc `84`. Dấu cách, dấu chấm và gạch ngang được bỏ qua. Ngoặc đơn như `(+84)` thì không.
+- `NormalizeVietnamesePhone` trả về dạng `0xxxxxxxxx`, hoặc `null` nếu số không hợp lệ.
+
+## Định dạng tiền VND
+
+```csharp
+CurrencyFormatter.ToVnd(1234567.5m);    // "1.234.568 ₫"
+CurrencyFormatter.ToVnd(-50000);        // "-50.000 ₫"
+CurrencyFormatter.ToVnd(1000, "VND");   // "1.000 VND"
+CurrencyFormatter.ToVnd(1000, "");      // "1.000"
+```
+
+Quy tắc chính:
+- Làm tròn đến đồng; nửa đồng làm tròn ra xa số 0 (`0,5` → `1`, `-0,5` → `-1`).
+- Dấu chấm ngăn cách hàng nghìn, không phụ thuộc vào `CultureInfo` của máy.
+- Ký hiệu đứng sau số, cách một dấu cách. Truyền `""` để bỏ ký hiệu.
+
 ## Chuyển ngày giờ PostgreSQL ↔ SQL Server
 
 ```csharp
