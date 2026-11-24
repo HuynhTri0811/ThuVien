@@ -19,6 +19,7 @@ Bộ tiện ích tiếng Việt cho .NET 10.
 | | `ValidateWithMailServerAsync` | `"an@example.com"` → `EmailError.NullMx` (tên miền không nhận mail) |
 | | `SuggestCorrection` | `"an@gmial.com"` → `"an@gmail.com"` |
 | `CurrencyFormatter` | `ToVnd` | `1234567m` → `"1.234.567 ₫"` |
+| `SimpleList<T>` | `Add`, `Insert`, `RemoveAll`, `TryFind`, `Sort`, ... | danh sách tự tăng kích thước, giống `List<T>` |
 | `DbDateTimeConverter` | `PostgresTypeToSqlServer` | `"timestamptz(3)"` → `"datetimeoffset(3)"` |
 | | `SqlServerTypeToPostgres` | `"datetime"` → `"timestamp(3)"` |
 | | `PostgresToSqlServer` | `"2024-01-02 03:04:05+07"` → `"2024-01-01T20:04:05"` |
@@ -103,6 +104,31 @@ Quy tắc chính:
 - Có máy chủ mail không có nghĩa là hộp thư tồn tại; muốn chắc chắn vẫn cần gửi mail xác nhận.
 - Dùng máy chủ DNS riêng hoặc đổi thời gian chờ: `new DnsMxResolver([new IPEndPoint(IPAddress.Parse("1.1.1.1"), 53)], TimeSpan.FromSeconds(2))`. Cài `IMailServerResolver` để tự tra theo cách khác (vd. trong test).
 - Thời gian chờ tính chung cho mọi truy vấn (MX, A, AAAA) gửi tới một máy chủ DNS. Các máy chủ được thử lần lượt, nên một lần tra mất tối đa khoảng số máy chủ × thời gian chờ.
+
+## Danh sách `SimpleList<T>`
+
+Danh sách có kiểu, tự tăng kích thước, dùng giống `List<T>`. Xem thêm [docs/list-trong-csharp.md](docs/list-trong-csharp.md).
+
+```csharp
+var so = new SimpleList<int> { 3, 1, 2 };
+so.Add(4);                      // [3, 1, 2, 4]
+so.Insert(0, 9);                // [9, 3, 1, 2, 4]
+so.RemoveAll(x => x > 3);       // trả về 2 → [3, 1, 2]
+so.Sort();                      // [1, 2, 3]
+
+if (so.TryFind(x => x == 0, out var v)) { /* không vào đây */ }
+
+foreach (var x in so) { }       // struct enumerator, không cấp phát bộ nhớ
+IReadOnlyList<int> chiDoc = so.AsReadOnly();
+```
+
+Quy tắc chính:
+- Bên trong là một mảng. Lần thêm đầu tiên cấp mảng 4 ô; khi đầy thì cấp mảng gấp đôi. Đặt trước sức chứa bằng `new SimpleList<T>(n)` hoặc `EnsureCapacity(n)` khi biết số lượng.
+- Cài `IList<T>` và `IReadOnlyList<T>`, nên dùng được với LINQ và mọi API nhận các interface này.
+- `TryFind` thay cho `List<T>.Find`: trả về `true`/`false` nên phân biệt được "không tìm thấy" với "tìm thấy giá trị mặc định" (vd. số 0).
+- Thêm, xóa hay sửa phần tử trong lúc `foreach` hoặc `ForEach` gây `InvalidOperationException`. Dùng `RemoveAll` để xóa theo điều kiện.
+- Xóa phần tử sẽ bỏ tham chiếu khỏi mảng bên trong, để bộ thu gom rác giải phóng được đối tượng.
+- `Sort` không ổn định. Không an toàn khi nhiều luồng cùng ghi.
 
 ## Sử dụng
 
