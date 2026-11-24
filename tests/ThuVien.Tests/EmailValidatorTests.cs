@@ -100,6 +100,34 @@ public class EmailValidatorSyntaxTests
     }
 
     [Theory]
+    [InlineData("a@b\u200d.vn")] // ký tự định dạng vô hình (ZWJ)
+    [InlineData("a@b\u00ad.vn")] // gạch nối mềm
+    [InlineData("a@b\u0000.vn")]
+    [InlineData("a@b\u00a0c.vn")] // khoảng trắng không ngắt
+    [InlineData("a@b\ue000.vn")] // vùng dùng riêng
+    public void Domain_WithInvisibleOrControlChars_IsInvalid(string email) =>
+        Assert.Equal(EmailError.DomainInvalid, EmailValidator.Validate(email).Error);
+
+    [Theory]
+    [InlineData("a@xn--zz.vn")]
+    [InlineData("a@xn--.vn")]
+    [InlineData("a@xn---.vn")]
+    [InlineData("a@xn--a.vn")]
+    [InlineData("a@xn--ab-.vn")]
+    [InlineData("a@xn--80ak6aa92e.xn--zz")]
+    public void BadPunycode_ReturnsResult_NeverThrows(string email)
+    {
+        var result = EmailValidator.Validate(email);
+        if (result.IsValid)
+        {
+            // Nếu nhận thì dạng Unicode phải đổi ngược lại đúng dạng ASCII.
+            var normalized = result.NormalizedEmail!;
+            var unicodeDomain = normalized[(normalized.IndexOf('@') + 1)..];
+            Assert.Equal(result.AsciiEmail, "a@" + new System.Globalization.IdnMapping().GetAscii(unicodeDomain));
+        }
+    }
+
+    [Theory]
     [InlineData("an@gmial.com", "an@gmail.com")]
     [InlineData("an@gmail.co", "an@gmail.com")]
     [InlineData("an@gmai.com", "an@gmail.com")]

@@ -175,7 +175,7 @@ public static class EmailValidator
             return Fail(EmailError.DomainTooLong);
         }
 
-        var asciiDomain = ToAsciiDomain(domain);
+        var asciiDomain = ToAsciiDomain(domain, out var unicodeDomain);
         if (asciiDomain is null)
         {
             // Vẫn gợi ý được, vd. "an@gmail" → "an@gmail.com".
@@ -195,7 +195,7 @@ public static class EmailValidator
         return new EmailValidationResult
         {
             Error = EmailError.None,
-            NormalizedEmail = local + "@" + new IdnMapping().GetUnicode(asciiDomain),
+            NormalizedEmail = local + "@" + unicodeDomain,
             AsciiEmail = local + "@" + asciiDomain,
             Suggestion = Suggest(local, asciiDomain),
         };
@@ -308,12 +308,45 @@ public static class EmailValidator
     }
 
     /// <summary>Đổi tên miền sang ASCII (Punycode, viết thường) và kiểm tra từng nhãn; <c>null</c> nếu không hợp lệ.</summary>
-    internal static string? ToAsciiDomain(string domain)
+    internal static string? ToAsciiDomain(string domain) => ToAsciiDomain(domain, out _);
+
+    /// <summary>
+    /// Như <see cref="ToAsciiDomain(string)"/>, kèm dạng Unicode của tên miền (vd. <c>thư.vn</c>).
+    /// Chỉ nhận tên miền đổi qua lại ASCII ↔ Unicode được mà không đổi giá trị, để kết quả giống nhau
+    /// dù chạy với ICU hay ở chế độ invariant globalization (Docker/Alpine, AOT).
+    /// </summary>
+    internal static string? ToAsciiDomain(string domain, out string unicode)
     {
+        unicode = "";
+
+        // Ký tự điều khiển, định dạng vô hình (vd. U+200D), khoảng trắng, ... không bao giờ hợp lệ trong tên miền.
+        // ICU tự từ chối chúng nhưng chế độ invariant thì không, nên chặn trước.
+        foreach (var c in domain)
+        {
+            switch (char.GetUnicodeCategory(c))
+            {
+                case UnicodeCategory.Control:
+                case UnicodeCategory.Format:
+                case UnicodeCategory.SpaceSeparator:
+                case UnicodeCategory.LineSeparator:
+                case UnicodeCategory.ParagraphSeparator:
+                case UnicodeCategory.Surrogate:
+                case UnicodeCategory.PrivateUse:
+                case UnicodeCategory.OtherNotAssigned:
+                    return null;
+            }
+        }
+
         string ascii;
         try
         {
-            ascii = new IdnMapping { UseStd3AsciiRules = true }.GetAscii(domain).ToLowerInvariant();
+            var idn = new IdnMapping { UseStd3AsciiRules = true };
+            ascii = idn.GetAscii(domain.ToLowerInvariant()).ToLowerInvariant();
+            unicode = idn.GetUnicode(ascii);
+            if (!string.Equals(idn.GetAscii(unicode), ascii, StringComparison.OrdinalIgnoreCase))
+            {
+                return null; // Punycode không chuẩn (giải mã rồi mã hóa lại ra chuỗi khác)
+            }
         }
         catch (ArgumentException)
         {
@@ -328,22 +361,33 @@ public static class EmailValidator
 
         foreach (var label in labels)
         {
-            if (label.Length is 0 or > 63 || label[0] == '-' || label[^1] == '-')
+            if (!IsLdhLabel(label))
             {
                 return null;
-            }
-
-            foreach (var c in label)
-            {
-                if (!char.IsAsciiLetterLower(c) && !char.IsAsciiDigit(c) && c != '-')
-                {
-                    return null;
-                }
             }
         }
 
         // Đuôi tên miền toàn số (vd. "a@1.2.3.4") không phải tên miền.
         return labels[^1].All(char.IsAsciiDigit) ? null : ascii;
+    }
+
+    /// <summary>Nhãn 1–63 ký tự gồm chữ thường ASCII, số, gạch ngang; không bắt đầu/kết thúc bằng gạch ngang.</summary>
+    internal static bool IsLdhLabel(string label)
+    {
+        if (label.Length is 0 or > 63 || label[0] == '-' || label[^1] == '-')
+        {
+            return false;
+        }
+
+        foreach (var c in label)
+        {
+            if (!char.IsAsciiLetterLower(c) && !char.IsAsciiDigit(c) && c != '-')
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static string? Suggest(string local, string domain)
